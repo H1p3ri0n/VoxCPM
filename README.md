@@ -209,31 +209,51 @@ voxcpm design \
   --text "VoxCPM2 brings studio-quality multilingual speech synthesis." \
   --output out.wav
 
-# Controllable voice cloning with style control
+# Voice design from a text file (alternative to --text)
+voxcpm design \
+  --text-file script.txt \
+  --output out.wav
+
+# Voice design with style control
 voxcpm design \
   --text "VoxCPM2 brings studio-quality multilingual speech synthesis." \
   --control "Young female voice, warm and gentle, slightly smiling" \
   --output out.wav
 
-# Voice cloning (reference audio)
+# Voice cloning from a reference audio
 voxcpm clone \
   --text "This is a voice cloning demo." \
   --reference-audio path/to/voice.wav \
   --output out.wav
 
-# Ultimate cloning (prompt audio + transcript)
+# Voice cloning with text read from a file
+voxcpm clone \
+  --text-file script.txt \
+  --reference-audio path/to/voice.wav \
+  --output out.wav
+
+# Ultimate cloning (prompt audio + transcript for maximum similarity)
 voxcpm clone \
   --text "This is a voice cloning demo." \
   --prompt-audio path/to/voice.wav \
   --prompt-text "reference transcript" \
-  --reference-audio path/to/voice.wav \ # optional, for better simliarity
+  --reference-audio path/to/voice.wav \
   --output out.wav
 
-# Batch processing
-voxcpm batch --input examples/input.txt --output-dir outs
+# Batch processing from a line-per-utterance text file (output_001.wav, output_002.wav, …)
+voxcpm batch --input examples/input.txt --output-dir outs/
+
+# Batch processing from a folder of .txt files (one audio per file, named after the source)
+voxcpm batch --input scripts/ --output-dir outs/
+
+# Batch cloning from a folder with a reference voice
+voxcpm batch --input scripts/ --output-dir outs/ --reference-audio path/to/voice.wav
 
 # Help
 voxcpm --help
+voxcpm design --help
+voxcpm clone --help
+voxcpm batch --help
 ```
 
 ### Web Demo

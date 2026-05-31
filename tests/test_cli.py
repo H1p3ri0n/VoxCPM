@@ -322,6 +322,128 @@ def test_batch_subcommand_applies_control(monkeypatch, tmp_path):
     ]
 
 
+def test_batch_file_mode_output_names(monkeypatch, tmp_path):
+    """Each line in the input file produces output_NNN.wav."""
+    saved_files = []
+    soundfile_stub = types.SimpleNamespace(
+        write=lambda path, *a, **kw: saved_files.append(Path(path).name)
+    )
+    monkeypatch.setitem(sys.modules, "soundfile", soundfile_stub)
+    monkeypatch.setattr(cli, "load_model", lambda args: DummyModel())
+
+    input_file = tmp_path / "lines.txt"
+    input_file.write_text("alpha\nbeta\ngamma\n", encoding="utf-8")
+
+    run_main(
+        monkeypatch,
+        ["batch", "--input", str(input_file), "--output-dir", str(tmp_path / "outs")],
+    )
+
+    assert saved_files == ["output_001.wav", "output_002.wav", "output_003.wav"]
+
+
+def test_batch_folder_mode_generates_one_audio_per_txt(monkeypatch, tmp_path):
+    """A folder of .txt files produces one .wav per file, named after the stem."""
+    saved_files = []
+    soundfile_stub = types.SimpleNamespace(
+        write=lambda path, *a, **kw: saved_files.append(Path(path).name)
+    )
+    monkeypatch.setitem(sys.modules, "soundfile", soundfile_stub)
+    monkeypatch.setattr(cli, "load_model", lambda args: DummyModel())
+
+    input_dir = tmp_path / "scripts"
+    input_dir.mkdir()
+    (input_dir / "intro.txt").write_text("Welcome to VoxCPM.", encoding="utf-8")
+    (input_dir / "outro.txt").write_text("Thanks for listening.", encoding="utf-8")
+
+    run_main(
+        monkeypatch,
+        ["batch", "--input", str(input_dir), "--output-dir", str(tmp_path / "outs")],
+    )
+
+    assert sorted(saved_files) == ["intro.wav", "outro.wav"]
+
+
+def test_batch_folder_mode_text_content(monkeypatch, tmp_path):
+    """Text from each .txt file (not the filename) is passed to model.generate."""
+    dummy_model = DummyModel()
+    monkeypatch.setattr(cli, "load_model", lambda args: dummy_model)
+    patch_soundfile_write(monkeypatch)
+
+    input_dir = tmp_path / "scripts"
+    input_dir.mkdir()
+    (input_dir / "a.txt").write_text("first script\n", encoding="utf-8")
+    (input_dir / "b.txt").write_text("second script\n", encoding="utf-8")
+
+    run_main(
+        monkeypatch,
+        ["batch", "--input", str(input_dir), "--output-dir", str(tmp_path / "outs")],
+    )
+
+    texts = {call["text"] for call in dummy_model.calls}
+    assert texts == {"first script", "second script"}
+
+
+def test_batch_folder_mode_applies_control(monkeypatch, tmp_path):
+    dummy_model = DummyModel()
+    monkeypatch.setattr(cli, "load_model", lambda args: dummy_model)
+    patch_soundfile_write(monkeypatch)
+
+    input_dir = tmp_path / "scripts"
+    input_dir.mkdir()
+    (input_dir / "line.txt").write_text("hello world", encoding="utf-8")
+
+    run_main(
+        monkeypatch,
+        [
+            "batch",
+            "--input",
+            str(input_dir),
+            "--output-dir",
+            str(tmp_path / "outs"),
+            "--control",
+            "calm narrator",
+        ],
+    )
+
+    assert dummy_model.calls[0]["text"] == "(calm narrator)hello world"
+
+
+def test_batch_folder_mode_rejects_empty_folder(monkeypatch, tmp_path, capsys):
+    empty_dir = tmp_path / "empty"
+    empty_dir.mkdir()
+    monkeypatch.setattr(sys, "argv", [
+        "voxcpm", "batch", "--input", str(empty_dir), "--output-dir", str(tmp_path / "outs"),
+    ])
+
+    with pytest.raises(SystemExit):
+        cli.main()
+
+    assert "no .txt files" in capsys.readouterr().err
+
+
+def test_batch_folder_mode_skips_empty_txt_files(monkeypatch, tmp_path, capsys):
+    """Empty .txt files are skipped with a warning; non-empty ones still succeed."""
+    dummy_model = DummyModel()
+    monkeypatch.setattr(cli, "load_model", lambda args: dummy_model)
+    patch_soundfile_write(monkeypatch)
+
+    input_dir = tmp_path / "scripts"
+    input_dir.mkdir()
+    (input_dir / "good.txt").write_text("real text", encoding="utf-8")
+    (input_dir / "empty.txt").write_text("   \n  \n", encoding="utf-8")
+
+    run_main(
+        monkeypatch,
+        ["batch", "--input", str(input_dir), "--output-dir", str(tmp_path / "outs")],
+    )
+
+    captured = capsys.readouterr()
+    assert "skipping empty file" in captured.err
+    assert len(dummy_model.calls) == 1
+    assert dummy_model.calls[0]["text"] == "real text"
+
+
 def test_legacy_clone_with_prompt_file_still_works(monkeypatch, tmp_path, capsys):
     dummy_model = DummyModel()
     prompt_audio = tmp_path / "prompt.wav"
@@ -513,6 +635,163 @@ def test_batch_rejects_control_with_prompt_transcript(monkeypatch, tmp_path, cap
         cli.main()
 
     assert "--control cannot be used together" in capsys.readouterr().err
+
+
+def test_design_subcommand_reads_text_file(monkeypatch, tmp_path):
+    dummy_model = DummyModel()
+    text_file = tmp_path / "script.txt"
+    text_file.write_text("hello from file\n", encoding="utf-8")
+
+    monkeypatch.setattr(cli, "load_model", lambda args: dummy_model)
+    patch_soundfile_write(monkeypatch)
+
+    run_main(
+        monkeypatch,
+        [
+            "design",
+            "--text-file",
+            str(text_file),
+            "--output",
+            str(tmp_path / "out.wav"),
+        ],
+    )
+
+    assert dummy_model.calls[0]["text"] == "hello from file"
+
+
+def test_design_text_file_applies_control(monkeypatch, tmp_path):
+    dummy_model = DummyModel()
+    text_file = tmp_path / "script.txt"
+    text_file.write_text("hello from file", encoding="utf-8")
+
+    monkeypatch.setattr(cli, "load_model", lambda args: dummy_model)
+    patch_soundfile_write(monkeypatch)
+
+    run_main(
+        monkeypatch,
+        [
+            "design",
+            "--text-file",
+            str(text_file),
+            "--control",
+            "warm female voice",
+            "--output",
+            str(tmp_path / "out.wav"),
+        ],
+    )
+
+    assert dummy_model.calls[0]["text"] == "(warm female voice)hello from file"
+
+
+def test_clone_reads_text_file(monkeypatch, tmp_path):
+    dummy_model = DummyModel()
+    reference_audio = tmp_path / "ref.wav"
+    reference_audio.write_bytes(b"RIFF")
+    text_file = tmp_path / "script.txt"
+    text_file.write_text("clone from file", encoding="utf-8")
+
+    monkeypatch.setattr(cli, "load_model", lambda args: dummy_model)
+    patch_soundfile_write(monkeypatch)
+
+    run_main(
+        monkeypatch,
+        [
+            "clone",
+            "--text-file",
+            str(text_file),
+            "--reference-audio",
+            str(reference_audio),
+            "--output",
+            str(tmp_path / "out.wav"),
+        ],
+    )
+
+    assert dummy_model.calls[0]["text"] == "clone from file"
+
+
+def test_design_rejects_text_and_text_file_together(monkeypatch, tmp_path, capsys):
+    text_file = tmp_path / "script.txt"
+    text_file.write_text("from file", encoding="utf-8")
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "voxcpm",
+            "design",
+            "--text",
+            "inline",
+            "--text-file",
+            str(text_file),
+            "--output",
+            str(tmp_path / "out.wav"),
+        ],
+    )
+
+    with pytest.raises(SystemExit):
+        cli.main()
+
+    assert "Use either --text or --text-file" in capsys.readouterr().err
+
+
+def test_design_requires_some_text_input(monkeypatch, tmp_path, capsys):
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "voxcpm",
+            "design",
+            "--output",
+            str(tmp_path / "out.wav"),
+        ],
+    )
+
+    with pytest.raises(SystemExit):
+        cli.main()
+
+    assert "requires --text or --text-file" in capsys.readouterr().err
+
+
+def test_missing_text_file_reports_parser_error(monkeypatch, tmp_path, capsys):
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "voxcpm",
+            "design",
+            "--text-file",
+            str(tmp_path / "missing.txt"),
+            "--output",
+            str(tmp_path / "out.wav"),
+        ],
+    )
+
+    with pytest.raises(SystemExit):
+        cli.main()
+
+    assert "input text file" in capsys.readouterr().err
+
+
+def test_legacy_text_file_still_works_and_warns(monkeypatch, tmp_path, capsys):
+    dummy_model = DummyModel()
+    text_file = tmp_path / "script.txt"
+    text_file.write_text("legacy from file", encoding="utf-8")
+
+    monkeypatch.setattr(cli, "load_model", lambda args: dummy_model)
+    patch_soundfile_write(monkeypatch)
+
+    run_main(
+        monkeypatch,
+        [
+            "--text-file",
+            str(text_file),
+            "--output",
+            str(tmp_path / "out.wav"),
+        ],
+    )
+
+    captured = capsys.readouterr()
+    assert "deprecated" in captured.err
+    assert dummy_model.calls[0]["text"] == "legacy from file"
 
 
 def test_detect_model_architecture_uses_local_configs():

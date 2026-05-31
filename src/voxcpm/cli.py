@@ -68,6 +68,27 @@ def build_final_text(text: str, control: str | None) -> str:
     return f"({control}){text}" if control else text
 
 
+def resolve_text(args, parser) -> str | None:
+    text = getattr(args, "text", None)
+    text_file = getattr(args, "text_file", None)
+
+    if text and text_file:
+        parser.error("Use either --text or --text-file, not both.")
+
+    if text_file:
+        text_path = require_file_exists(text_file, parser, "input text file")
+        return text_path.read_text(encoding="utf-8").strip()
+
+    if text:
+        return text.strip()
+
+    return None
+
+
+def has_text_input(args) -> bool:
+    return bool(getattr(args, "text", None) or getattr(args, "text_file", None))
+
+
 def resolve_prompt_text(args, parser) -> str | None:
     prompt_text = getattr(args, "prompt_text", None)
     prompt_file = getattr(args, "prompt_file", None)
@@ -273,7 +294,8 @@ def _run_single(args, parser, *, text: str, output: str, prompt_text: str | None
 
 def cmd_design(args, parser):
     validate_design_args(args, parser)
-    final_text = build_final_text(args.text, args.control)
+    text = resolve_text(args, parser)
+    final_text = build_final_text(text, args.control)
     return _run_single(
         args, parser, text=final_text, output=args.output, prompt_text=None
     )
@@ -281,7 +303,8 @@ def cmd_design(args, parser):
 
 def cmd_clone(args, parser):
     prompt_text = validate_clone_args(args, parser)
-    final_text = build_final_text(args.text, args.control)
+    text = resolve_text(args, parser)
+    final_text = build_final_text(text, args.control)
     return _run_single(
         args, parser, text=final_text, output=args.output, prompt_text=prompt_text
     )
@@ -305,18 +328,64 @@ def cmd_validate(args, parser):
         sys.exit(1)
 
 
-def cmd_batch(args, parser):
+def _synthesize_one(model, text, output_file, prompt_audio_path, reference_audio_path, prompt_text, args):
     import soundfile as sf
 
-    input_file = require_file_exists(args.input, parser, "input file")
+    audio_array = model.generate(
+        text=text,
+        prompt_wav_path=prompt_audio_path,
+        prompt_text=prompt_text,
+        reference_wav_path=reference_audio_path,
+        cfg_value=args.cfg_value,
+        inference_timesteps=args.inference_timesteps,
+        normalize=args.normalize,
+        denoise=args.denoise and (prompt_audio_path is not None or reference_audio_path is not None),
+    )
+    sf.write(str(output_file), audio_array, model.tts_model.sample_rate)
+    duration = len(audio_array) / model.tts_model.sample_rate
+    print(f"Saved: {output_file} ({duration:.2f}s)", file=sys.stderr)
+
+
+def _collect_batch_items_from_file(input_path: Path, parser) -> list[tuple[str, str]]:
+    """Returns a list of (text, output_stem) pairs from a line-per-utterance file."""
+    with open(input_path, "r", encoding="utf-8") as f:
+        lines = [line.strip() for line in f if line.strip()]
+    if not lines:
+        parser.error(f"Input file '{input_path}' is empty.")
+    return [(text, f"output_{i:03d}") for i, text in enumerate(lines, 1)]
+
+
+def _collect_batch_items_from_folder(input_path: Path, parser) -> list[tuple[str, str]]:
+    """Returns a list of (text, output_stem) pairs from a folder of .txt files."""
+    txt_files = sorted(input_path.glob("*.txt"))
+    if not txt_files:
+        parser.error(f"Input folder '{input_path}' contains no .txt files.")
+    items = []
+    for txt_file in txt_files:
+        text = txt_file.read_text(encoding="utf-8").strip()
+        if not text:
+            print(f"Warning: skipping empty file '{txt_file}'", file=sys.stderr)
+            continue
+        items.append((text, txt_file.stem))
+    if not items:
+        parser.error(f"All .txt files in '{input_path}' are empty.")
+    return items
+
+
+def cmd_batch(args, parser):
+    input_path = Path(args.input)
+
+    if input_path.is_dir():
+        items = _collect_batch_items_from_folder(input_path, parser)
+        print(f"Batch folder mode: {len(items)} file(s) found in '{input_path}'", file=sys.stderr)
+    elif input_path.is_file():
+        items = _collect_batch_items_from_file(input_path, parser)
+        print(f"Batch file mode: {len(items)} line(s) in '{input_path}'", file=sys.stderr)
+    else:
+        parser.error(f"--input '{args.input}' is not a file or directory.")
+
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
-
-    with open(input_file, "r", encoding="utf-8") as f:
-        texts = [line.strip() for line in f if line.strip()]
-
-    if not texts:
-        sys.exit("Error: Input file is empty")
 
     prompt_text = validate_batch_args(args, parser)
     model = load_model(args)
@@ -335,32 +404,19 @@ def cmd_batch(args, parser):
 
     success_count = 0
 
-    for i, text in enumerate(texts, 1):
+    for text, stem in items:
+        output_file = output_dir / f"{stem}.wav"
         try:
             final_text = build_final_text(text, args.control)
-            audio_array = model.generate(
-                text=final_text,
-                prompt_wav_path=prompt_audio_path,
-                prompt_text=prompt_text,
-                reference_wav_path=reference_audio_path,
-                cfg_value=args.cfg_value,
-                inference_timesteps=args.inference_timesteps,
-                normalize=args.normalize,
-                denoise=args.denoise
-                and (prompt_audio_path is not None or reference_audio_path is not None),
+            _synthesize_one(
+                model, final_text, output_file,
+                prompt_audio_path, reference_audio_path, prompt_text, args,
             )
-
-            output_file = output_dir / f"output_{i:03d}.wav"
-            sf.write(str(output_file), audio_array, model.tts_model.sample_rate)
-
-            duration = len(audio_array) / model.tts_model.sample_rate
-            print(f"Saved: {output_file} ({duration:.2f}s)", file=sys.stderr)
             success_count += 1
-
         except Exception as e:
-            print(f"Failed on line {i}: {e}", file=sys.stderr)
+            print(f"Failed on '{stem}': {e}", file=sys.stderr)
 
-    print(f"\nBatch finished: {success_count}/{len(texts)} succeeded", file=sys.stderr)
+    print(f"\nBatch finished: {success_count}/{len(items)} succeeded", file=sys.stderr)
 
 
 # -----------------------------
@@ -370,6 +426,11 @@ def cmd_batch(args, parser):
 
 def _add_common_generation_args(parser):
     parser.add_argument("--text", "-t", help="Text to synthesize")
+    parser.add_argument(
+        "--text-file",
+        "-tf",
+        help="Read text to synthesize from a file (alternative to --text)",
+    )
     parser.add_argument(
         "--control",
         type=str,
@@ -488,9 +549,13 @@ def _build_parser():
         epilog="""
 Examples:
   voxcpm design --text "Hello world" --output out.wav
+  voxcpm design --text-file script.txt --output out.wav
   voxcpm design --text "Hello world" --control "warm female voice" --output out.wav
   voxcpm clone --text "Hello" --reference-audio ref.wav --output out.wav
-  voxcpm batch --input texts.txt --output-dir ./outs --reference-audio ref.wav
+  voxcpm clone --text-file script.txt --reference-audio ref.wav --output out.wav
+  voxcpm batch --input texts.txt --output-dir ./outs
+  voxcpm batch --input scripts/ --output-dir ./outs
+  voxcpm batch --input scripts/ --output-dir ./outs --reference-audio ref.wav
         """,
     )
 
@@ -594,9 +659,9 @@ Examples:
 def _dispatch_legacy(args, parser):
     warn_legacy_mode()
 
-    if args.input and args.text:
+    if args.input and has_text_input(args):
         parser.error(
-            "Use either batch mode (--input) or single mode (--text), not both."
+            "Use either batch mode (--input) or single mode (--text/--text-file), not both."
         )
 
     if args.input:
@@ -604,8 +669,10 @@ def _dispatch_legacy(args, parser):
             parser.error("Batch mode requires --output-dir")
         return cmd_batch(args, parser)
 
-    if not args.text or not args.output:
-        parser.error("Single-sample legacy mode requires --text and --output")
+    if not has_text_input(args) or not args.output:
+        parser.error(
+            "Single-sample legacy mode requires --text/--text-file and --output"
+        )
 
     if (
         args.prompt_audio
@@ -633,13 +700,13 @@ def main():
     validate_ranges(args, parser)
 
     if args.command == "design":
-        if not args.text:
-            parser.error("`design` requires --text")
+        if not has_text_input(args):
+            parser.error("`design` requires --text or --text-file")
         return cmd_design(args, parser)
 
     if args.command == "clone":
-        if not args.text or not args.output:
-            parser.error("`clone` requires --text and --output")
+        if not has_text_input(args) or not args.output:
+            parser.error("`clone` requires --text/--text-file and --output")
         return cmd_clone(args, parser)
 
     if args.command == "batch":
