@@ -2,6 +2,7 @@ import os
 import re
 import sys
 import logging
+import random
 import numpy as np
 import gradio as gr
 from typing import Optional, Tuple
@@ -44,8 +45,8 @@ _EXAMPLES_FOOTER_EN = (
     "**Example 1 — Gentle & Melancholic Girl**  \n"
     '`Control Instruction`: *"A young girl with a soft, sweet voice. '
     'Speaks slowly with a melancholic, slightly tsundere tone."*  \n'
-    '`Target Text`: *"I never asked you to stay… It\'s not like I care or anything. '
-    'But… why does it still hurt so much now that you\'re gone?"*  \n\n'
+    "`Target Text`: *\"I never asked you to stay… It's not like I care or anything. "
+    "But… why does it still hurt so much now that you're gone?\"*  \n\n"
     "**Example 2 — Laid-Back Surfer Dude**  \n"
     '`Control Instruction`: *"Relaxed young male voice, slightly nasal, '
     'lazy drawl, very casual and chill."*  \n'
@@ -115,6 +116,10 @@ _I18N_TRANSLATIONS = {
         "cfg_info": "Higher → closer to the prompt / reference; lower → more creative variation",
         "dit_steps_label": "LocDiT flow-matching steps",
         "dit_steps_info": "LocDiT flow-matching steps — more steps → maybe better audio quality, but slower",
+        "seed_label": "Seed",
+        "seed_info": "Seed used for reproducible generation. Updated with the actual successful seed after generation.",
+        "random_seed_label": "Random Seed",
+        "random_seed_info": "Generate a new seed before each inference run.",
         "usage_instructions": _USAGE_INSTRUCTIONS_EN,
         "examples_footer": _EXAMPLES_FOOTER_EN,
     },
@@ -142,7 +147,7 @@ _I18N_TRANSLATIONS = {
         "examples_footer": _EXAMPLES_FOOTER_ZH,
     },
     "zh-Hans": None,  # alias, filled below
-    "zh": None,       # alias, filled below
+    "zh": None,  # alias, filled below
 }
 _I18N_TRANSLATIONS["zh-Hans"] = _I18N_TRANSLATIONS["zh-CN"]
 _I18N_TRANSLATIONS["zh"] = _I18N_TRANSLATIONS["zh-CN"]
@@ -155,8 +160,7 @@ for _d in _I18N_TRANSLATIONS.values():
 I18N = gr.I18n(**_I18N_TRANSLATIONS)
 
 DEFAULT_TARGET_TEXT = (
-    "VoxCPM2 is a creative multilingual TTS model from ModelBest, "
-    "designed to generate highly realistic speech."
+    "VoxCPM2 is a creative multilingual TTS model from ModelBest, " "designed to generate highly realistic speech."
 )
 
 _CUSTOM_CSS = """
@@ -219,6 +223,7 @@ _APP_THEME = gr.themes.Soft(
 
 # ---------- Model ----------
 
+
 class VoxCPMDemo:
     def __init__(self, model_id: str = "openbmb/VoxCPM2", device: str = "auto") -> None:
         self.device = resolve_runtime_device(device, "cuda")
@@ -247,9 +252,7 @@ class VoxCPMDemo:
     def get_or_load_asr_model(self) -> AutoModel:
         if self.asr_model is not None:
             return self.asr_model
-        logger.info(
-            f"Loading ASR model: {self.asr_model_id} on device: {self.asr_device}"
-        )
+        logger.info(f"Loading ASR model: {self.asr_model_id} on device: {self.asr_device}")
         self.asr_model = AutoModel(
             model=self.asr_model_id,
             disable_update=True,
@@ -279,6 +282,7 @@ class VoxCPMDemo:
         do_normalize: bool,
         denoise: bool,
         inference_timesteps: int = 10,
+        seed: Optional[int] = None,
     ) -> dict:
         generate_kwargs = dict(
             text=final_text,
@@ -287,6 +291,7 @@ class VoxCPMDemo:
             inference_timesteps=inference_timesteps,
             normalize=do_normalize,
             denoise=denoise,
+            seed=seed,
         )
         if prompt_text_clean and audio_path:
             generate_kwargs["prompt_wav_path"] = audio_path
@@ -303,7 +308,8 @@ class VoxCPMDemo:
         do_normalize: bool = True,
         denoise: bool = True,
         inference_timesteps: int = 10,
-    ) -> Tuple[int, np.ndarray]:
+        seed: Optional[int] = None,
+    ) -> Tuple[int, np.ndarray, Optional[int]]:
         current_model = self.get_or_load_voxcpm()
 
         text = (text_input or "").strip()
@@ -335,15 +341,31 @@ class VoxCPMDemo:
             do_normalize=do_normalize,
             denoise=denoise,
             inference_timesteps=inference_timesteps,
+            seed=seed,
         )
         wav = current_model.generate(**generate_kwargs)
-        return (current_model.tts_model.sample_rate, wav)
+        last_successful_seed = getattr(current_model.tts_model, "last_successful_seed", seed)
+        return (current_model.tts_model.sample_rate, wav, last_successful_seed)
 
 
 # ---------- UI ----------
 
+
 def create_demo_interface(demo: VoxCPMDemo):
     gr.set_static_paths(paths=[Path.cwd().absolute() / "assets"])
+
+    def _coerce_seed(seed_value) -> Optional[int]:
+        if seed_value is None or seed_value == "":
+            return None
+        return int(seed_value)
+
+    def _prepare_seed(use_random_seed: bool, seed_value):
+        if use_random_seed:
+            return random.randint(0, 2**32 - 1)
+        return _coerce_seed(seed_value)
+
+    def _on_random_seed_toggle(checked):
+        return gr.update(interactive=not checked)
 
     def _generate(
         text: str,
@@ -355,10 +377,12 @@ def create_demo_interface(demo: VoxCPMDemo):
         do_normalize: bool,
         denoise: bool,
         dit_steps: int,
+        seed_value,
     ):
         actual_prompt_text = prompt_text_value.strip() if use_prompt_text else ""
         actual_control = "" if use_prompt_text else control_instruction
-        sr, wav_np = demo.generate_tts_audio(
+        seed = _coerce_seed(seed_value)
+        sr, wav_np, last_successful_seed = demo.generate_tts_audio(
             text_input=text,
             control_instruction=actual_control,
             reference_wav_path_input=ref_wav,
@@ -367,8 +391,9 @@ def create_demo_interface(demo: VoxCPMDemo):
             do_normalize=do_normalize,
             denoise=denoise,
             inference_timesteps=int(dit_steps),
+            seed=seed,
         )
-        return (sr, wav_np)
+        return (sr, wav_np), last_successful_seed
 
     def _on_toggle_instant(checked):
         """Instant UI toggle — no ASR, no blocking."""
@@ -465,6 +490,20 @@ def create_demo_interface(demo: VoxCPMDemo):
                         label=I18N("dit_steps_label"),
                         info=I18N("dit_steps_info"),
                     )
+                    with gr.Row():
+                        seed_value = gr.Number(
+                            value=random.randint(0, 2**32 - 1),
+                            precision=0,
+                            label=I18N("seed_label"),
+                            info=I18N("seed_info"),
+                            interactive=False,
+                        )
+                        random_seed = gr.Checkbox(
+                            value=True,
+                            label=I18N("random_seed_label"),
+                            elem_classes=["switch-toggle"],
+                            info=I18N("random_seed_info"),
+                        )
 
                 run_btn = gr.Button(I18N("generate_btn"), variant="primary", size="lg")
 
@@ -482,7 +521,18 @@ def create_demo_interface(demo: VoxCPMDemo):
             outputs=[prompt_text],
         )
 
+        random_seed.change(
+            fn=_on_random_seed_toggle,
+            inputs=[random_seed],
+            outputs=[seed_value],
+        )
+
         run_btn.click(
+            fn=_prepare_seed,
+            inputs=[random_seed, seed_value],
+            outputs=[seed_value],
+            show_progress=False,
+        ).then(
             fn=_generate,
             inputs=[
                 text,
@@ -494,13 +544,15 @@ def create_demo_interface(demo: VoxCPMDemo):
                 DoNormalizeText,
                 DoDenoisePromptAudio,
                 dit_steps,
+                seed_value,
             ],
-            outputs=[audio_output],
+            outputs=[audio_output, seed_value],
             show_progress=True,
             api_name="generate",
         )
 
     return interface
+
 
 def run_demo(
     server_name: str = "0.0.0.0",
@@ -523,12 +575,22 @@ def run_demo(
 
 if __name__ == "__main__":
     import argparse
+
     parser = argparse.ArgumentParser()
     parser.add_argument(
-        "--model-id", type=str, default="openbmb/VoxCPM2",
+        "--model-id",
+        type=str,
+        default="openbmb/VoxCPM2",
         help="Local path or HuggingFace repo ID (default: openbmb/VoxCPM2)",
     )
     parser.add_argument("--port", type=int, default=8808, help="Server port")
+    parser.add_argument(
+        "--host",
+        type=str,
+        default="0.0.0.0",
+        help="Bind address. Use 127.0.0.1 to restrict access to the local machine; "
+             "the default 0.0.0.0 exposes the unauthenticated UI/API to the network (default: 0.0.0.0)",
+    )
     parser.add_argument(
         "--device",
         type=str,
@@ -536,4 +598,9 @@ if __name__ == "__main__":
         help="Runtime device: auto, cpu, mps, cuda, or cuda:N (default: auto)",
     )
     args = parser.parse_args()
-    run_demo(model_id=args.model_id, server_port=args.port, device=args.device)
+    run_demo(
+        model_id=args.model_id,
+        server_name=args.host,
+        server_port=args.port,
+        device=args.device,
+    )

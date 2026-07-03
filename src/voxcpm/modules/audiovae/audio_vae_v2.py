@@ -551,8 +551,7 @@ class StreamingVAEDecoder:
             if x.shape[-1] >= _p:
                 states[_k] = x[:, :, -_p:].detach()
             else:
-                prev = states.get(_k, torch.zeros(x.shape[0], x.shape[1], _p,
-                                                  device=x.device, dtype=x.dtype))
+                prev = states.get(_k, torch.zeros(x.shape[0], x.shape[1], _p, device=x.device, dtype=x.dtype))
                 states[_k] = torch.cat([prev, x], dim=-1)[:, :, -_p:].detach()
             return nn.Conv1d.forward(_m, x_pad)
 

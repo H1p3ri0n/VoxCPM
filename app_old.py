@@ -6,6 +6,7 @@ import gradio as gr
 from typing import Optional, Tuple
 from funasr import AutoModel
 from pathlib import Path
+
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 if os.environ.get("HF_REPO_ID", "").strip() == "":
     os.environ["HF_REPO_ID"] = "openbmb/VoxCPM1.5"
@@ -23,7 +24,7 @@ class VoxCPMDemo:
         self.asr_model: Optional[AutoModel] = AutoModel(
             model=self.asr_model_id,
             disable_update=True,
-            log_level='DEBUG',
+            log_level="DEBUG",
             device="cuda:0" if self.device == "cuda" else "cpu",
         )
 
@@ -48,6 +49,7 @@ class VoxCPMDemo:
             if not os.path.isdir(target_dir):
                 try:
                     from huggingface_hub import snapshot_download  # type: ignore
+
                     os.makedirs(target_dir, exist_ok=True)
                     print(f"Downloading model from HF repo '{repo_id}' to '{target_dir}' ...", file=sys.stderr)
                     snapshot_download(repo_id=repo_id, local_dir=target_dir, local_dir_use_symlinks=False)
@@ -72,7 +74,7 @@ class VoxCPMDemo:
         if prompt_wav is None:
             return ""
         res = self.asr_model.generate(input=prompt_wav, language="auto", use_itn=True)
-        text = res[0]["text"].split('|>')[-1]
+        text = res[0]["text"].split("|>")[-1]
         return text
 
     def generate_tts_audio(
@@ -149,11 +151,13 @@ _CUSTOM_CSS = """
 
 def create_demo_interface(demo: VoxCPMDemo):
     """Build the Gradio UI for VoxCPM demo."""
-    gr.set_static_paths(paths=[Path.cwd().absolute()/"assets"])
+    gr.set_static_paths(paths=[Path.cwd().absolute() / "assets"])
 
     with gr.Blocks() as interface:
         # Header logo
-        gr.HTML('<div class="logo-container"><img src="/gradio_api/file=assets/voxcpm_logo.png" alt="VoxCPM Logo"></div>')
+        gr.HTML(
+            '<div class="logo-container"><img src="/gradio_api/file=assets/voxcpm_logo.png" alt="VoxCPM Logo"></div>'
+        )
 
         # Quick Start
         with gr.Accordion("📋 Quick Start Guide ｜快速入门", open=False, elem_id="acc_quick"):
@@ -201,7 +205,7 @@ def create_demo_interface(demo: VoxCPMDemo):
         with gr.Row():
             with gr.Column():
                 prompt_wav = gr.Audio(
-                    sources=["upload", 'microphone'],
+                    sources=["upload", "microphone"],
                     type="filepath",
                     label="Prompt Speech (Optional, or let VoxCPM improvise)",
                     value="./examples/example.wav",
@@ -210,13 +214,13 @@ def create_demo_interface(demo: VoxCPMDemo):
                     value=False,
                     label="Prompt Speech Enhancement",
                     elem_id="chk_denoise",
-                    info="We use ZipEnhancer model to denoise the prompt audio."
+                    info="We use ZipEnhancer model to denoise the prompt audio.",
                 )
                 with gr.Row():
                     prompt_text = gr.Textbox(
                         value="Just by listening a few minutes a day, you'll be able to eliminate negative thoughts by conditioning your mind to be more positive.",
                         label="Prompt Text",
-                        placeholder="Please enter the prompt text. Automatic recognition is supported, and you can correct the results yourself..."
+                        placeholder="Please enter the prompt text. Automatic recognition is supported, and you can correct the results yourself...",
                     )
                 run_btn = gr.Button("Generate Speech", variant="primary")
 
@@ -227,7 +231,7 @@ def create_demo_interface(demo: VoxCPMDemo):
                     value=2.0,
                     step=0.1,
                     label="CFG Value (Guidance Scale)",
-                    info="Higher values increase adherence to prompt, lower values allow more creativity"
+                    info="Higher values increase adherence to prompt, lower values allow more creativity",
                 )
                 inference_timesteps = gr.Slider(
                     minimum=4,
@@ -235,7 +239,7 @@ def create_demo_interface(demo: VoxCPMDemo):
                     value=10,
                     step=1,
                     label="Inference Timesteps",
-                    info="Number of inference timesteps for generation (higher values may improve quality but slower)"
+                    info="Number of inference timesteps for generation (higher values may improve quality but slower)",
                 )
                 with gr.Row():
                     text = gr.Textbox(
@@ -247,14 +251,22 @@ def create_demo_interface(demo: VoxCPMDemo):
                         value=False,
                         label="Text Normalization",
                         elem_id="chk_normalize",
-                        info="We use wetext library to normalize the input text."
+                        info="We use wetext library to normalize the input text.",
                     )
                 audio_output = gr.Audio(label="Output Audio")
 
         # Wiring
         run_btn.click(
             fn=demo.generate_tts_audio,
-            inputs=[text, prompt_wav, prompt_text, cfg_value, inference_timesteps, DoNormalizeText, DoDenoisePromptAudio],
+            inputs=[
+                text,
+                prompt_wav,
+                prompt_text,
+                cfg_value,
+                inference_timesteps,
+                DoNormalizeText,
+                DoDenoisePromptAudio,
+            ],
             outputs=[audio_output],
             show_progress=True,
             api_name="generate",

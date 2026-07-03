@@ -350,45 +350,80 @@ class AudioFeatureProcessingPacker:
 
         # -- text token track --
         # [103, 0×R, 104, text_ids, 101, 0×A, 102]
-        text_token_info = torch.cat([
-            _tok([self.audio_prompt_start_id]),
-            torch.zeros(ref_len, dtype=torch.int32, device=device),
-            _tok([self.audio_prompt_end_id]),
-            text_token,
-            _tok([self.audio_start_id]),
-            torch.zeros(tgt_len, dtype=torch.int32, device=device),
-            _tok([self.audio_end_id]),
-        ])
+        text_token_info = torch.cat(
+            [
+                _tok([self.audio_prompt_start_id]),
+                torch.zeros(ref_len, dtype=torch.int32, device=device),
+                _tok([self.audio_prompt_end_id]),
+                text_token,
+                _tok([self.audio_start_id]),
+                torch.zeros(tgt_len, dtype=torch.int32, device=device),
+                _tok([self.audio_end_id]),
+            ]
+        )
 
         # -- audio feature track --
         zero_1 = torch.zeros((1,) + feat_shape, dtype=torch.float32, device=device)
         zero_txt = torch.zeros((txt_len,) + feat_shape, dtype=torch.float32, device=device)
-        audio_feat_info = torch.cat([
-            zero_1, ref_feats, zero_1,      # 103, ref, 104
-            zero_txt,                        # text
-            zero_1, tgt_feats, zero_1,       # 101, target, 102
-        ], dim=0)
+        audio_feat_info = torch.cat(
+            [
+                zero_1,
+                ref_feats,
+                zero_1,  # 103, ref, 104
+                zero_txt,  # text
+                zero_1,
+                tgt_feats,
+                zero_1,  # 101, target, 102
+            ],
+            dim=0,
+        )
 
         # -- masks --
-        text_mask = torch.cat([
-            torch.ones(1), torch.zeros(ref_len), torch.ones(1),
-            torch.ones(txt_len),
-            torch.ones(1), torch.zeros(tgt_len), torch.ones(1),
-        ]).to(torch.int32).to(device)
+        text_mask = (
+            torch.cat(
+                [
+                    torch.ones(1),
+                    torch.zeros(ref_len),
+                    torch.ones(1),
+                    torch.ones(txt_len),
+                    torch.ones(1),
+                    torch.zeros(tgt_len),
+                    torch.ones(1),
+                ]
+            )
+            .to(torch.int32)
+            .to(device)
+        )
 
-        audio_mask = torch.cat([
-            torch.zeros(1), torch.ones(ref_len), torch.zeros(1),
-            torch.zeros(txt_len),
-            torch.zeros(1), torch.ones(tgt_len), torch.zeros(1),
-        ]).to(torch.int32).to(device)
+        audio_mask = (
+            torch.cat(
+                [
+                    torch.zeros(1),
+                    torch.ones(ref_len),
+                    torch.zeros(1),
+                    torch.zeros(txt_len),
+                    torch.zeros(1),
+                    torch.ones(tgt_len),
+                    torch.zeros(1),
+                ]
+            )
+            .to(torch.int32)
+            .to(device)
+        )
 
-        loss_mask = torch.cat([
-            torch.zeros(1 + ref_len + 1),   # ref part: no loss
-            torch.zeros(txt_len),            # text: no loss
-            torch.zeros(1),                  # 101: no loss
-            torch.ones(tgt_len),             # target audio: LOSS
-            torch.zeros(1),                  # 102: no loss
-        ]).to(torch.int32).to(device)
+        loss_mask = (
+            torch.cat(
+                [
+                    torch.zeros(1 + ref_len + 1),  # ref part: no loss
+                    torch.zeros(txt_len),  # text: no loss
+                    torch.zeros(1),  # 101: no loss
+                    torch.ones(tgt_len),  # target audio: LOSS
+                    torch.zeros(1),  # 102: no loss
+                ]
+            )
+            .to(torch.int32)
+            .to(device)
+        )
 
         total_len = 1 + ref_len + 1 + txt_len + 1 + tgt_len + 1
         labels = torch.zeros(total_len, dtype=torch.int32, device=device)

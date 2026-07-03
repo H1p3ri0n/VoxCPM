@@ -308,7 +308,8 @@ def run_inference(text, prompt_wav, prompt_text, lora_selection, cfg_scale, step
             if new_r is not None and current_r is not None and new_r != current_r:
                 print(f"LoRA rank mismatch (model r={current_r}, checkpoint r={new_r}), reloading...", file=sys.stderr)
                 reload_base = (
-                    new_base_model if new_base_model and os.path.exists(new_base_model)
+                    new_base_model
+                    if new_base_model and os.path.exists(new_base_model)
                     else (pretrained_path if pretrained_path and pretrained_path.strip() else default_pretrained_path)
                 )
                 try:
@@ -982,9 +983,7 @@ with gr.Blocks(title="VoxCPM LoRA WebUI", theme=gr.themes.Soft(), css=custom_css
 
                         gr.Markdown("#### 分发选项 (Distribution)")
                         with gr.Row():
-                            hf_model_id = gr.Textbox(
-                                label="HuggingFace Model ID (e.g., openbmb/VoxCPM2)", value=""
-                            )
+                            hf_model_id = gr.Textbox(label="HuggingFace Model ID (e.g., openbmb/VoxCPM2)", value="")
                             distribute = gr.Checkbox(label="分发模式 (distribute)", value=False)
 
                 with gr.Column(scale=2, elem_classes="form-section"):

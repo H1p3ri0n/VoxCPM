@@ -19,6 +19,7 @@ With voice cloning:
         --text "Hello, this is voice cloning result." \
         --prompt_audio path/to/ref.wav \
         --prompt_text "Reference audio transcript" \
+        --seed 42 \
         --output ft_clone.wav
 """
 
@@ -86,6 +87,12 @@ def parse_args():
         action="store_true",
         help="Enable text normalization",
     )
+    parser.add_argument(
+        "--seed",
+        type=int,
+        default=None,
+        help="Random seed for generation (default: None)",
+    )
     return parser.parse_args()
 
 
@@ -109,6 +116,9 @@ def main():
         print(f"[FT Inference] Using reference audio: {prompt_wav_path}", file=sys.stderr)
         print(f"[FT Inference] Reference text: {prompt_text}", file=sys.stderr)
 
+    if args.seed is not None:
+        print(f"[FT Inference] Using seed: {args.seed}", file=sys.stderr)
+
     audio_np = model.generate(
         text=args.text,
         prompt_wav_path=prompt_wav_path,
@@ -118,6 +128,7 @@ def main():
         max_len=args.max_len,
         normalize=args.normalize,
         denoise=False,
+        seed=args.seed,
     )
 
     # Save audio

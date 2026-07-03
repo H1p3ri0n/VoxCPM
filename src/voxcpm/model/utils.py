@@ -5,9 +5,12 @@ from transformers import PreTrainedTokenizer
 
 _LOW_PRECISION_DTYPES = {"bfloat16", "bf16", "float16", "fp16"}
 _VALID_DTYPE_OVERRIDES = {
-    "bfloat16", "bf16",
-    "float16", "fp16",
-    "float32", "fp32",
+    "bfloat16",
+    "bf16",
+    "float16",
+    "fp16",
+    "float32",
+    "fp32",
 }
 
 
@@ -19,6 +22,19 @@ def next_and_close(gen):
         return next(gen)
     finally:
         gen.close()
+
+
+def materialize_generation_seed(seed: Optional[int]) -> int:
+    """Return a concrete seed for a generation request."""
+    if seed is not None:
+        return int(seed)
+    return int(torch.seed() & 0xFFFFFFFF)
+
+
+def apply_generation_seed(seed: int) -> None:
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
 
 
 def mask_multichar_chinese_tokens(tokenizer: PreTrainedTokenizer):
@@ -160,10 +176,7 @@ def pick_runtime_dtype(device: str, configured_dtype: str) -> str:
     override = os.environ.get("VOXCPM_MPS_DTYPE", "").strip().lower()
     if override:
         if override not in _VALID_DTYPE_OVERRIDES:
-            raise ValueError(
-                f"VOXCPM_MPS_DTYPE='{override}' is not one of "
-                f"{sorted(_VALID_DTYPE_OVERRIDES)}"
-            )
+            raise ValueError(f"VOXCPM_MPS_DTYPE='{override}' is not one of " f"{sorted(_VALID_DTYPE_OVERRIDES)}")
         return override
 
     if (configured_dtype or "").lower() in _LOW_PRECISION_DTYPES:
@@ -211,15 +224,13 @@ def resolve_runtime_device(device: Optional[str], configured_device: str = "cuda
     if explicit.startswith("cuda"):
         if not torch.cuda.is_available():
             raise ValueError(
-                f"Requested device '{device}', but CUDA is not available. "
-                "Use device='auto' for automatic fallback."
+                f"Requested device '{device}', but CUDA is not available. " "Use device='auto' for automatic fallback."
             )
         return explicit
     if explicit == "mps":
         if not _has_mps():
             raise ValueError(
-                "Requested device 'mps', but MPS is not available. "
-                "Use device='auto' for automatic fallback."
+                "Requested device 'mps', but MPS is not available. " "Use device='auto' for automatic fallback."
             )
         return "mps"
     if explicit == "cpu":

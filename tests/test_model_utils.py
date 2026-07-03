@@ -47,3 +47,25 @@ def test_resolve_runtime_device_rejects_unavailable_explicit_cuda(monkeypatch):
 
     with pytest.raises(ValueError, match="CUDA is not available"):
         utils.resolve_runtime_device("cuda:0", "cuda")
+
+
+def test_materialize_generation_seed_preserves_explicit_seed():
+    assert utils.materialize_generation_seed(42) == 42
+
+
+def test_materialize_generation_seed_creates_concrete_seed_for_none(monkeypatch):
+    monkeypatch.setattr(utils.torch, "seed", lambda: 0x123456789)
+
+    assert utils.materialize_generation_seed(None) == 0x23456789
+
+
+def test_apply_generation_seed_sets_cpu_and_cuda_rng(monkeypatch):
+    calls = []
+
+    monkeypatch.setattr(utils.torch, "manual_seed", lambda seed: calls.append(("cpu", seed)))
+    monkeypatch.setattr(utils.torch.cuda, "is_available", lambda: True)
+    monkeypatch.setattr(utils.torch.cuda, "manual_seed_all", lambda seed: calls.append(("cuda", seed)))
+
+    utils.apply_generation_seed(123)
+
+    assert calls == [("cpu", 123), ("cuda", 123)]

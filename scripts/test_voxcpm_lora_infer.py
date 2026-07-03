@@ -16,6 +16,7 @@ With voice cloning:
         --text "This is voice cloning result." \
         --prompt_audio path/to/ref.wav \
         --prompt_text "Reference audio transcript" \
+        --seed 42 \
         --output lora_clone.wav
 
 Note: The script reads base_model path and lora_config from lora_config.json
@@ -94,6 +95,12 @@ def parse_args():
         action="store_true",
         help="Enable text normalization",
     )
+    parser.add_argument(
+        "--seed",
+        type=int,
+        default=None,
+        help="Random seed for generation (default: None)",
+    )
     return parser.parse_args()
 
 
@@ -130,6 +137,8 @@ def main():
     print(
         f"  LoRA config: r={lora_cfg.r}, alpha={lora_cfg.alpha}" if lora_cfg else "  LoRA config: None", file=sys.stderr
     )
+    if args.seed is not None:
+        print(f"  Seed: {args.seed}", file=sys.stderr)
 
     # 3. Load model with LoRA (no denoiser)
     print(f"\n[1/2] Loading model with LoRA: {pretrained_path}", file=sys.stderr)
@@ -161,6 +170,7 @@ def main():
         max_len=args.max_len,
         normalize=args.normalize,
         denoise=False,
+        seed=args.seed,
     )
     lora_output = out_path.with_stem(out_path.stem + "_with_lora")
     sf.write(str(lora_output), audio_np, model.tts_model.sample_rate)
@@ -181,6 +191,7 @@ def main():
         max_len=args.max_len,
         normalize=args.normalize,
         denoise=False,
+        seed=args.seed,
     )
     disabled_output = out_path.with_stem(out_path.stem + "_lora_disabled")
     sf.write(str(disabled_output), audio_np, model.tts_model.sample_rate)
@@ -201,6 +212,7 @@ def main():
         max_len=args.max_len,
         normalize=args.normalize,
         denoise=False,
+        seed=args.seed,
     )
     reenabled_output = out_path.with_stem(out_path.stem + "_lora_reenabled")
     sf.write(str(reenabled_output), audio_np, model.tts_model.sample_rate)
@@ -221,6 +233,7 @@ def main():
         max_len=args.max_len,
         normalize=args.normalize,
         denoise=False,
+        seed=args.seed,
     )
     reset_output = out_path.with_stem(out_path.stem + "_lora_reset")
     sf.write(str(reset_output), audio_np, model.tts_model.sample_rate)
@@ -242,6 +255,7 @@ def main():
         max_len=args.max_len,
         normalize=args.normalize,
         denoise=False,
+        seed=args.seed,
     )
     reload_output = out_path.with_stem(out_path.stem + "_lora_reloaded")
     sf.write(str(reload_output), audio_np, model.tts_model.sample_rate)

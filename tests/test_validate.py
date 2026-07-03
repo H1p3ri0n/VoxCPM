@@ -207,6 +207,7 @@ class TestValidateManifest:
 
         audio = tmp_dir / "audio_8k.wav"
         import numpy as np
+
         samples = np.zeros(8000, dtype=np.float32)
         sf.write(str(audio), samples, 8000)
 
@@ -240,6 +241,7 @@ class TestValidateManifest:
     def test_cli_validate_exit_code(self, tmp_dir):
         """validate subcommand must exit 1 on validation error (missing audio)."""
         import subprocess
+
         manifest = tmp_dir / "bad.jsonl"
         _write_manifest(manifest, [{"text": "hi", "audio": "/nonexistent/x.wav"}])
 
