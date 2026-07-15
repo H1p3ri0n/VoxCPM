@@ -37,12 +37,30 @@ PROJECT_DIR = Path(__file__).resolve().parent
 REFERENCE_DIR = PROJECT_DIR / "reference"
 OUTPUT_DIR = PROJECT_DIR / "out" / "story_reads"
 
-SENTENCE_PAUSE_S = 0.35   # silence inserted between sentences
-PARAGRAPH_PAUSE_S = 0.70  # silence inserted between paragraphs
+SENTENCE_PAUSE_S = 0.45   # silence inserted between sentences
+PARAGRAPH_PAUSE_S = 0.80  # silence inserted between paragraphs
 
-CFG_VALUE = 2.0
+# A quote + its short attribution tag are merged into one chunk only if the
+# combined result stays at/under this word count. Set generously (16): the tail
+# is already capped at <=6 words and the quote is validator-capped (LINE_MAX_WORDS
+# 18/22), so 16 covers virtually all real dialogue while still blocking a runaway
+# merge. A lower value (e.g. 10) orphans common 9-word questions + tag as tiny
+# mumble-prone clips — the very thing the merge exists to prevent.
+MERGE_MAX_WORDS = 16
+
+# When True, each sentence is prefixed with a VoxCPM style tag (see tone_for).
+# --notone turns this off for A/B testing a plain, tag-free prompt.
+TONE_ENABLED = True
+
+# Playback-speed multiplier applied per sentence (pitch-preserving time-stretch).
+# 1.0 = model's native pace; <1.0 = slower, >1.0 = faster. Set via --speed=X.
+# The model has no native speed knob, so this is the lever to match an older,
+# slower-paced reference read.
+SPEED = 1.0
+
+CFG_VALUE = 2.6  # 2.6 chosen by ear: cleaner articulation than 2.0 on the rooster voice
 INFERENCE_TIMESTEPS = 10
-SEED = 43  # 42 tends to hallucinate on short lines; 43 is the default base seed
+SEED = 45  # 45 is the default base seed (43 hallucinated an extra line on story_001)
 
 # Per-call reference denoising is DISABLED: VoxCPM's internal enhance() runs a
 # loudness-normalize step that needs torchaudio's torchcodec/FFmpeg backend,
@@ -58,7 +76,11 @@ DENOISE_REFERENCE = False
 # duration is sane or the retry budget runs out (then keep the shortest clip).
 DURATION_GUARD_ENABLED = True
 DURATION_MAX_RETRIES = 3          # extra attempts after the first generation
-WORDS_PER_SECOND = 0.7            # rough speaking budget: words * this + base
+WORDS_PER_SECOND = 0.5            # rough speaking budget: words * this + base
+                                 # (0.5 calibrated from rooster story_001 dur-report:
+                                 # natural spw 0.31-0.61, onomatopoeia up to 0.84;
+                                 # this limit clears the slowest natural read yet
+                                 # still catches ~2x appended-speech hallucinations)
 DURATION_BASE_S = 1.5            # fixed overhead per sentence
 DURATION_MIN_LIMIT_S = 2.5       # never flag anything under this as too long
 
@@ -71,7 +93,7 @@ DURATION_MIN_LIMIT_S = 2.5       # never flag anything under this as too long
 # candidates, so normal sentences stay at one generation (~no speed change).
 PITCH_GUARD_ENABLED = True
 PITCH_TOLERANCE_SEMITONES = 3.0   # accept if within +/- this of the reference median f0
-MAX_CANDIDATE_SEEDS = 3           # total seeds tried per sentence (incl. the first)
+MAX_CANDIDATE_SEEDS = 6           # total seeds tried per sentence (incl. the first)
 PITCH_FMIN_HZ = 65.0              # ~C2, low male
 PITCH_FMAX_HZ = 400.0            # covers female range
 
@@ -250,13 +272,11 @@ def _discover_jobs() -> list[tuple[str, Path, str]]:
     return jobs
 
 
-# Placeholder story set while the text is still under review — all rooster.
-# Replace with `JOBS = _discover_jobs()` when the story set is frozen.
-JOBS = [
-    ("batch01_story_001", TTS_STORIES / "batch_01" / "story_001.txt", VOICE_ROOSTER),
-    ("batch01_story_002", TTS_STORIES / "batch_01" / "story_002.txt", VOICE_ROOSTER),
-    ("batch01_story_003", TTS_STORIES / "batch_01" / "story_003.txt", VOICE_ROOSTER),
-]
+# Age 2-3 is text-frozen and audio-ready → generate all 25 (REPETITIVE 001-010 +
+# NARRATIVE 011-025) by default. 4-5/6-7 are still under dialogue review, so they
+# are intentionally excluded here (flip to full `_discover_jobs()` when frozen).
+# CLI still filters, e.g. `... age2-3_rep` or a single `... age2-3_nar_story_012`.
+JOBS = [j for j in _discover_jobs() if j[0].startswith("age2-3")]
 
 # --- Level 2 tone selection -------------------------------------------------
 # Narration (no quotes) gets a calm storytelling tone. Dialogue (quoted speech)
@@ -302,6 +322,15 @@ DIALOGUE_EMOTION = {
     "giggled": "(warm, cheerful voice)",
     "chuckled": "(warm, cheerful voice)",
     "smiled": "(warm, cheerful voice)",
+    "happily": "(warm, cheerful voice)",
+    "cheerfully": "(warm, cheerful voice)",
+    # proud / warm / kind (added after First100 dialogue review)
+    "proudly": "(proud, bright voice)",
+    "warmly": "(warm, gentle voice)",
+    "kindly": "(warm, gentle voice)",
+    "shyly": "(soft, shy voice)",
+    "slowly": "(slow, calm voice)",
+    "firmly": "(firm, steady voice)",
     # sad / afraid
     "sobbed": "(sad, trembling voice)",
     "wailed": "(sad, trembling voice)",
@@ -325,6 +354,17 @@ def tone_for(sentence: str) -> str:
         if pattern.search(sentence):
             return tone
     return DEFAULT_DIALOGUE_TONE
+
+
+def build_prompt(sentence: str) -> str:
+    """Exact text handed to the model: style tag + SPACE + sentence.
+
+    The space matters: gluing the closing paren onto the first word (")Cow")
+    makes VoxCPM swallow the leading consonant. When TONE_ENABLED is False
+    (--notone) or the line is too short for a tag, the bare sentence is used.
+    """
+    tone = tone_for(sentence) if TONE_ENABLED else ""
+    return f"{tone} {sentence}" if tone else sentence
 # ---------------------------------------------------------------------------
 
 
@@ -395,7 +435,7 @@ def _sentence_cache_path(voice_tag: str, sentence: str) -> Path | None:
     """
     if not SENTENCE_CACHE_ENABLED:
         return None
-    prompt = f"{tone_for(sentence)}{sentence}"
+    prompt = build_prompt(sentence)
     key = "|".join([
         f"v={voice_tag}",
         f"logic={CACHE_LOGIC_VERSION}",
@@ -592,7 +632,7 @@ def generate_sentence(model, sentence: str, ref_path: Path, sample_rate: int,
         except Exception:
             pass  # unreadable cache -> fall through and regenerate
 
-    prompt = f"{tone_for(sentence)}{sentence}"
+    prompt = build_prompt(sentence)
     limit = expected_max_seconds(sentence)
     ref_f0 = reference_median_f0(ref_path) if PITCH_GUARD_ENABLED else None
     ref_centroid = (
@@ -694,6 +734,60 @@ def safe_name(stem: str) -> str:
     return cleaned or "voice"
 
 
+# Speech verbs that mark a dialogue attribution tag (`said Sam.`, `he called.`).
+_ATTR_SPEECH_VERBS = {
+    "said", "asked", "called", "cried", "replied", "whispered", "shouted",
+    "added", "answered", "murmured", "giggled", "laughed", "announced",
+    "growled", "warned", "sighed", "yelled", "gasped", "begged", "chuckled",
+    "exclaimed", "screamed", "snapped", "hissed", "muttered", "wondered",
+    "smiled", "grinned", "nodded",
+}
+
+
+def _is_attribution_tail(chunk: str) -> bool:
+    """True if `chunk` is a short dialogue attribution tag that belongs to the
+    PRECEDING quote — e.g. `said Sam.`, `he called.`, `the voice asked.`,
+    `Bell asked softly.`, `the little girl cried.`.
+
+    The sentence splitter breaks after `!"`/`?"`, so `"Help!" he called.` becomes
+    two chunks and the attribution generates as its own tiny (mumble-prone) clip.
+    Such a tail is merged back onto the quote it belongs to (see
+    `_merge_attribution_tails`). Only fires when the tail is short, quote-free,
+    and a speech verb sits at the FIRST word (inversion `said the girl`), the
+    LAST word (`the voice asked`), or second-to-last (trailing adverb
+    `Bell asked softly`). Verb in the middle (`she answered the door`) is NOT an
+    attribution and is left alone.
+    """
+    if '"' in chunk:
+        return False
+    words = [w.lower() for w in re.findall(r"[A-Za-z']+", chunk)]
+    if not (1 <= len(words) <= 6):
+        return False
+    if words[0] in _ATTR_SPEECH_VERBS:                 # "said Sam."
+        return True
+    if words[-1] in _ATTR_SPEECH_VERBS:                # "the voice asked."
+        return True
+    if len(words) >= 2 and words[-2] in _ATTR_SPEECH_VERBS:  # "Bell asked softly."
+        return True
+    return False
+
+
+def _merge_attribution_tails(sentences: list[str]) -> list[str]:
+    """Merge a short trailing attribution tag back onto its quote so `"Help!"`
+    and `he called.` render as ONE clean chunk instead of a tiny orphan clip.
+    Only merges when the previous chunk ends in a closing double-quote AND the
+    merged chunk stays short (<= MERGE_MAX_WORDS): a long quote + tail would form
+    an over-long utterance, so we leave those split."""
+    out: list[str] = []
+    for s in sentences:
+        if (out and out[-1].rstrip().endswith('"') and _is_attribution_tail(s)
+                and _word_count(out[-1]) + _word_count(s) <= MERGE_MAX_WORDS):
+            out[-1] = out[-1].rstrip() + " " + s
+        else:
+            out.append(s)
+    return out
+
+
 def split_into_paragraphs(text: str) -> list[list[str]]:
     """Return a list of paragraphs, each a list of sentence strings."""
     paragraphs = []
@@ -704,9 +798,14 @@ def split_into_paragraphs(text: str) -> list[list[str]]:
         # Split after sentence-ending punctuation, allowing an optional closing
         # quote before the whitespace, so a sentence like `... ever." Clover...`
         # is split into two (otherwise it glues to the next sentence and gets no
-        # inter-sentence pause). Matches check_tts.py's splitter.
-        sentences = re.split(r"(?<=[.!?])[\"']?\s+", block)
+        # inter-sentence pause). The closing quote is KEPT with its sentence (via
+        # look-behind, not consumed) so per-paragraph quote-balance counts stay
+        # correct — consuming it made `... hay?" Chicken...` look unbalanced.
+        sentences = re.split(r"(?<=[.!?][\"'])\s+|(?<=[.!?])\s+", block)
         sentences = [s.strip() for s in sentences if s.strip()]
+        # Re-attach short attribution tails (`"Help!"` + `he called.`) so a
+        # quote and its tag generate as one chunk (no tiny mumble-prone clip).
+        sentences = _merge_attribution_tails(sentences)
         if sentences:
             paragraphs.append(sentences)
     return paragraphs
@@ -714,12 +813,103 @@ def split_into_paragraphs(text: str) -> list[list[str]]:
 
 def main() -> int:
     global _CACHE_BYPASS
+    global LOUDNESS_NORMALIZE_ENABLED, TRIM_EDGES_ENABLED
+    global AUDIO_QUALITY_GUARD_ENABLED, ONSET_CLICK_ENABLED, CENTROID_GUARD_ENABLED
+    global TONE_ENABLED
+    global SPEED
+    global CFG_VALUE, INFERENCE_TIMESTEPS, SEED
+    dur_report = False
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
     # Separate flags (--...) from positional filter/override tokens.
     args = sys.argv[1:]
     flags = {a for a in args if a.startswith("--")}
     positional = [a for a in args if not a.startswith("--")]
+
+    # --raw: A/B diagnostic. Turn OFF everything added on top of "generate each
+    # sentence + stitch with silence": loudness normalize, edge trim, and the
+    # extended defect guards (onset-click / spectral-centroid / internal-silence).
+    # Basic duration/pitch guards stay on. Use to check if the new post-processing
+    # is what degraded the audio: `... age2-3_rep_story_001 --raw --no-cache`.
+    if "--raw" in flags:
+        LOUDNESS_NORMALIZE_ENABLED = False
+        TRIM_EDGES_ENABLED = False
+        AUDIO_QUALITY_GUARD_ENABLED = False
+        ONSET_CLICK_ENABLED = False
+        CENTROID_GUARD_ENABLED = False
+        print("RAW mode: loudness-norm, edge-trim, and extended guards OFF",
+              file=sys.stderr)
+
+    # --first=N: only generate the first N sentences of each story. Fast A/B
+    # testing so you don't wait for the whole story: `... --first=5 --no-cache`.
+    first_n: int | None = None
+    for f in flags:
+        if f.startswith("--first="):
+            try:
+                first_n = max(1, int(f.split("=", 1)[1]))
+            except ValueError:
+                print(f"invalid --first value: {f}", file=sys.stderr)
+                return 1
+    if first_n is not None:
+        print(f"first-{first_n} mode: only the first {first_n} sentence(s)",
+              file=sys.stderr)
+
+    # --notone: drop the VoxCPM style tag prefix entirely (plain sentence prompt).
+    # A/B against the tone-prefixed default to see if the tag hurts articulation.
+    if "--notone" in flags:
+        TONE_ENABLED = False
+        print("NOTONE mode: no style-tag prefix on sentences", file=sys.stderr)
+
+    # --dur-report: print a per-sentence duration table (word count / dur /
+    # sec-per-word / current limit) to calibrate the DURATION guard. Logging only.
+    dur_report_path = OUTPUT_DIR / "dur_report.txt"
+    if "--dur-report" in flags:
+        dur_report = True
+        dur_report_path.write_text(
+            "# per-sentence duration report\n"
+            f"# WORDS_PER_SECOND={WORDS_PER_SECOND} DURATION_BASE_S={DURATION_BASE_S} "
+            f"DURATION_MIN_LIMIT_S={DURATION_MIN_LIMIT_S}\n",
+            encoding="utf-8",
+        )
+        print(f"dur-report: writing table to {dur_report_path}", file=sys.stderr)
+
+    # --speed=X: pitch-preserving time-stretch per sentence (X<1 slower).
+    for f in flags:
+        if f.startswith("--speed="):
+            try:
+                SPEED = float(f.split("=", 1)[1])
+            except ValueError:
+                print(f"invalid --speed value: {f}", file=sys.stderr)
+                return 1
+            if not (0.5 <= SPEED <= 1.5):
+                print(f"--speed out of range (0.5-1.5): {SPEED}", file=sys.stderr)
+                return 1
+    if SPEED != 1.0:
+        print(f"speed mode: {SPEED}x (pitch-preserving time-stretch)", file=sys.stderr)
+
+    # --timesteps=N / --cfg=X: generation-quality overrides. Higher timesteps
+    # give cleaner onsets and less sampling noise (10 is fast but rough; try
+    # 16-32). cfg tunes how tightly the model follows the reference/prompt.
+    for f in flags:
+        if f.startswith("--timesteps="):
+            try:
+                INFERENCE_TIMESTEPS = int(f.split("=", 1)[1])
+            except ValueError:
+                print(f"invalid --timesteps value: {f}", file=sys.stderr)
+                return 1
+        elif f.startswith("--cfg="):
+            try:
+                CFG_VALUE = float(f.split("=", 1)[1])
+            except ValueError:
+                print(f"invalid --cfg value: {f}", file=sys.stderr)
+                return 1
+        elif f.startswith("--seed="):
+            try:
+                SEED = int(f.split("=", 1)[1])
+            except ValueError:
+                print(f"invalid --seed value: {f}", file=sys.stderr)
+                return 1
+    print(f"gen params: timesteps={INFERENCE_TIMESTEPS} cfg={CFG_VALUE} seed={SEED}", file=sys.stderr)
 
     if "--no-cache" in flags:
         _CACHE_BYPASS = True
@@ -809,6 +999,8 @@ def main() -> int:
         stem = f"{label}_{voice_tag_for(voice_name)}"
         if cli_run:
             stem += "_cmd"
+        if first_n is not None:
+            stem += f"_first{first_n}"
         output_path = OUTPUT_DIR / f"{stem}.wav"
         print(f"[{i}/{len(jobs)}] {label}  <- {txt_path.name}  voice={voice_name[:32]}")
 
@@ -826,6 +1018,19 @@ def main() -> int:
             print("  empty story, skipping", file=sys.stderr)
             failures.append(label)
             continue
+
+        # --first=N: keep only the first N sentences (across paragraphs).
+        if first_n is not None:
+            trimmed: list[list[str]] = []
+            remaining = first_n
+            for para in paragraphs:
+                if remaining <= 0:
+                    break
+                take = para[:remaining]
+                if take:
+                    trimmed.append(take)
+                    remaining -= len(take)
+            paragraphs = trimmed
 
         vtag = voice_tag_for(voice_name)
 
@@ -851,8 +1056,27 @@ def main() -> int:
                         model, sentence, ref_path, sample_rate, vtag
                     )
                     wav = np.asarray(wav, dtype=np.float32)
+                    if SPEED != 1.0 and wav.size:
+                        wav = np.asarray(
+                            librosa.effects.time_stretch(wav, rate=SPEED),
+                            dtype=np.float32,
+                        )
                     if TRIM_EDGES_ENABLED:
                         wav = _trim_edges(wav, sample_rate)
+                    if dur_report:
+                        wc = _word_count(sentence)
+                        dur = wav.size / sample_rate
+                        lim = expected_max_seconds(sentence)
+                        spw = dur / wc if wc else 0.0
+                        flag = " <-- OVER" if dur > lim else ""
+                        row = (
+                            f"[dur] {label} p{p_index}.s{s_index} "
+                            f"words={wc:2d} dur={dur:5.2f}s spw={spw:4.2f} "
+                            f"limit={lim:4.2f}s{flag}  {sentence[:42]!r}"
+                        )
+                        print("  " + row, file=sys.stderr)
+                        with dur_report_path.open("a", encoding="utf-8") as _f:
+                            _f.write(row + "\n")
                     items.append({"p": p_index, "s": s_index, "text": sentence, "wav": wav})
                     for reason in s_issues:
                         review_entries.append({
