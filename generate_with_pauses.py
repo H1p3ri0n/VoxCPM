@@ -34,11 +34,19 @@ from voxcpm import VoxCPM
 
 # --- configuration ---------------------------------------------------------
 PROJECT_DIR = Path(__file__).resolve().parent
-REFERENCE_DIR = PROJECT_DIR / "reference"
-OUTPUT_DIR = PROJECT_DIR / "out" / "story_reads"
+REFERENCE_DIR = PROJECT_DIR / "ref"
+# OUTPUT_BASE is the shared root: the sentence cache, review queue and dur-report
+# all live directly under it so they are shared across age groups. Each story's
+# audio is routed into an age-group subfolder by _output_dir_for_label(), so
+# age2-3 / age4-5 / age6-7 outputs never collide. OUTPUT_DIR is kept only so the
+# cache/review paths below (OUTPUT_DIR.parent) stay anchored at OUTPUT_BASE.
+OUTPUT_BASE = PROJECT_DIR / "out" / "first100"
+OUTPUT_DIR = OUTPUT_BASE / "age2-3"
 
-SENTENCE_PAUSE_S = 0.45   # silence inserted between sentences
-PARAGRAPH_PAUSE_S = 0.80  # silence inserted between paragraphs
+SENTENCE_PAUSE_S = 0.45   # silence between sentences within a paragraph (single \n).
+                          # Per-age via AGE_PROFILES (age2-3 uses 0.7).
+PARAGRAPH_PAUSE_S = 0.80  # silence between paragraphs (blank line / \n\n).
+                          # Per-age via AGE_PROFILES (age2-3 uses 1.2).
 
 # A quote + its short attribution tag are merged into one chunk only if the
 # combined result stays at/under this word count. Set generously (16): the tail
@@ -58,7 +66,15 @@ TONE_ENABLED = True
 # slower-paced reference read.
 SPEED = 1.0
 
-CFG_VALUE = 2.6  # 2.6 chosen by ear: cleaner articulation than 2.0 on the rooster voice
+CFG_VALUE = 2.5  # 2.5 = the sweet spot: clean articulation + stable cloned timbre with a
+                 # touch more expressive prosody than 2.6. 2.3 was TRIED for even more
+                 # expression but it loosened the reference lock too much: swallowed leading
+                 # words (`"We..."`), stray extra phonemes, and a coarse/rough voice on some
+                 # lines. 2.5 keeps the --lively + emotion-tone expressiveness WITHOUT those
+                 # artifacts (listener-confirmed clean). Do NOT chase expression by lowering
+                 # cfg further — that reintroduces the 2.3 defects; expressiveness must come
+                 # from --lively + the tones. cfg is in the cache key -> changing it
+                 # regenerates every sentence. (Override per-run with --cfg=X.)
 INFERENCE_TIMESTEPS = 10
 SEED = 45  # 45 is the default base seed (43 hallucinated an extra line on story_001)
 
@@ -84,6 +100,58 @@ WORDS_PER_SECOND = 0.5            # rough speaking budget: words * this + base
 DURATION_BASE_S = 1.5            # fixed overhead per sentence
 DURATION_MIN_LIMIT_S = 2.5       # never flag anything under this as too long
 
+# --- Duration LOWER bound (rushed / too-fast guard) ------------------------
+# Mirror of the upper bound, for the FAST side. Reject a candidate whose read is
+# rushed: shorter than words*MIN_WORDS_PER_SECOND + MIN_DURATION_BASE_S. Values
+# calibrated from the story_251 guard-report (accepted spw 0.27-0.80, median
+# ~0.48-0.51 which the listener confirmed is an acceptable pace): this floor
+# catches only the clearly rushed tail (~9% of sentences, effective spw < ~0.33
+# on mid/long lines) without carpet-bombing the bulk, so it slows the worst
+# offenders while keeping generation cheap. Raise MIN_WORDS_PER_SECOND toward
+# 0.33 to be stricter (more re-rolls). Disable via DURATION_MIN_GUARD_ENABLED=False.
+#
+# ENABLED for ALL sentences (fast side): reject a rushed read. Gentle floor
+# (0.28 coeff + 0.5s base -> effective ~0.36 spw on a 6-word line) so only the
+# clearly rushed tail (~9% in the story_251 data) is caught, not the bulk. It
+# pairs with the always-on upper bound so every sentence now has both a too-slow
+# AND a too-fast check. Per-age via AGE_PROFILES; lower toward 0.25 for age2-3 if
+# it over-rejects short lines (base dominates there and the pitch guard is busy).
+DURATION_MIN_GUARD_ENABLED = True
+MIN_WORDS_PER_SECOND = 0.28
+MIN_DURATION_BASE_S = 0.5
+
+# --- Quote-pace guard (intra-sentence rushed dialogue) ---------------------
+# The duration guards measure the WHOLE chunk's AVERAGE pace, so a fast quote
+# followed by a slower attribution tag ("...," said Coco.) averages out and slips
+# through. This guard splits the generated audio at the pause before the
+# attribution and checks the QUOTED span's rate on its own. It only fires on
+# sentences that end in a short attribution tail AND have a detectable pause
+# before it (no clear pause -> not checked, a deliberate false-negative rather
+# than a false-positive). Conservative floor; raise QUOTE_MIN_WORDS_PER_SECOND to
+# be stricter. Per-age via AGE_PROFILES. Disable with QUOTE_PACE_GUARD_ENABLED=False.
+QUOTE_PACE_GUARD_ENABLED = True
+QUOTE_MIN_WORDS_PER_SECOND = 0.37   # quoted span read faster than this = rushed
+                                    # (0.40 -> 0.37: the model tops out at ~0.38-0.39
+                                    # on some quotes, so 0.40 just burned all 8 seeds
+                                    # and kept ~0.38 anyway; 0.37 accepts that quickly
+                                    # while still catching the clearly rushed <0.37)
+QUOTE_MIN_WORDS = 3                 # only judge quotes with at least this many words
+
+# --- ASR verification (Whisper) for dialogue -------------------------------
+# Opt-in (default OFF; enable per-age via AGE_PROFILES or the --asr CLI flag).
+# For quote+attribution sentences ONLY (a small subset), transcribe each
+# candidate with Whisper to: (1) verify the words are intelligible/correct —
+# catches mumble AND hallucination via a fuzzy transcript match; (2) use
+# word-level timestamps to measure the QUOTED span's pace accurately (replaces
+# the fragile silence-split heuristic). The audio array is fed straight to the
+# model, so NO FFmpeg/torchcodec is needed. Model auto-downloads once
+# (~290MB whisper-base). Cost: one extra ASR pass per dialogue candidate —
+# bounded because most lines are narration. ASR can mis-hear ultra-short clips,
+# so the match ratio is lenient and QUOTE_MIN_WORDS keeps tiny quotes out.
+ASR_VERIFY_ENABLED = False
+ASR_MODEL = "openai/whisper-base"
+ASR_MATCH_MIN_RATIO = 0.60          # transcript vs text similarity below this = mumble/halluc
+
 # --- Pitch guard (timbre-drift safety net) ---------------------------------
 # VoxCPM samples each sentence independently, so an unlucky seed can render a
 # sentence far below/above the reference's natural pitch (the "deep last line"
@@ -93,7 +161,12 @@ DURATION_MIN_LIMIT_S = 2.5       # never flag anything under this as too long
 # candidates, so normal sentences stay at one generation (~no speed change).
 PITCH_GUARD_ENABLED = True
 PITCH_TOLERANCE_SEMITONES = 3.0   # accept if within +/- this of the reference median f0
-MAX_CANDIDATE_SEEDS = 6           # total seeds tried per sentence (incl. the first)
+                                 # (back to the original 3.0: the 4.5 bump only made
+                                 # sense with the global slow-pace prompt, which is now
+                                 # disabled, so the systematic pitch offset is gone)
+MAX_CANDIDATE_SEEDS = 8           # total seeds tried per sentence (incl. the first)
+                                 # (raised 6 -> 8: the quote-pace guard adds another
+                                 # constraint, so give more tries before a compromise)
 PITCH_FMIN_HZ = 65.0              # ~C2, low male
 PITCH_FMAX_HZ = 400.0            # covers female range
 
@@ -150,10 +223,40 @@ TEXT_LONG_SENTENCE_WORDS = 45    # warn on sentences longer than this (hallucina
 # have a concrete "listen/regenerate this" to-do list instead of scrollback.
 REVIEW_QUEUE_PATH = OUTPUT_DIR.parent / "review_queue.json"
 
+# --- Guard diagnostics log -------------------------------------------------
+# When --guard-report is passed, EVERY per-seed candidate measurement (duration,
+# seconds-per-word, pitch deviation, word count, limit, and accept/reject) is
+# appended here. This captures the accepted seed too (the normal log only prints
+# rejects), so a full run can be saved and analysed to calibrate the duration
+# lower/upper bounds. None = off (default).
+GUARD_LOG_PATH: Path | None = None
+
+# --- Lively mode (--lively): trade stability for expressiveness -------------
+# The stacked guards (pitch / centroid-timbre / quote-pace / duration-lower) plus
+# loudness normalization tend to REJECT the natural, characterful FIRST take and
+# re-roll to a safe, near-median "average" one, which sounds lifeless. The
+# listener confirmed the original (few-guard) reads were livelier despite the
+# occasional artifact. --lively thins the guards back to a minimal safety net —
+# keep only hallucination-length, onset-click, internal-silence, and a LOOSE
+# pitch bound (gross drift only) — loosens (does NOT disable) the too-fast floor
+# so only genuinely rushed lines are caught, turns OFF loudness-norm + centroid +
+# quote-pace, and cuts the seed budget so the lively first take usually survives.
+# It ALSO forces the expressive narration tone across all ages. Applied in
+# apply_age_profile() (so it overrides per-age profiles) AND main() (for the
+# non-profile globals). NOTE: because lively changes NARRATION_TONE it also
+# changes the sentence cache key, so lively and normal runs never collide in
+# cache; still pair with --no-cache for a clean A/B.
+#
+# DEFAULT = True: lively IS the validated production config, so it runs with no
+# flag needed (`... --no-cache` is the production command). The full-guard path
+# is NOT deleted — it is still reachable with `--safe`, which flips this back to
+# False and restores loudness-norm + centroid + quote-pace + tight pitch. Keep it
+# that way: --safe is the A/B baseline for re-validating any future change (new
+# voice, age6-7 set, etc.).
+LIVELY_MODE = True
+
 # --- Story set + voice assignment (calibration run) ------------------------
-DREAMCANVAS = Path(
-    "/Users/xi/Desktop/Projects/DreamCanvasWithPrebuiltInStory/DreamCanvas"
-)
+DREAMCANVAS = Path(r"D:\Repos\DreamCanvas")
 FIRST100 = DREAMCANVAS / "StoryFilesProduction" / "First100"
 TTS_STORIES = DREAMCANVAS / "tts_stories"
 
@@ -272,20 +375,170 @@ def _discover_jobs() -> list[tuple[str, Path, str]]:
     return jobs
 
 
-# Age 2-3 is text-frozen and audio-ready → generate all 25 (REPETITIVE 001-010 +
-# NARRATIVE 011-025) by default. 4-5/6-7 are still under dialogue review, so they
-# are intentionally excluded here (flip to full `_discover_jobs()` when frozen).
-# CLI still filters, e.g. `... age2-3_rep` or a single `... age2-3_nar_story_012`.
-JOBS = [j for j in _discover_jobs() if j[0].startswith("age2-3")]
+# Active production set for THIS run: ALL age2-3 (its text was just updated, so a
+# full re-run overwrites the previous age2-3 output) PLUS the first
+# AGE45_SAMPLE_COUNT age4-5 stories. _discover_jobs() returns them sorted, so
+# age4-5[:N] = story_251..(251+N-1). age6-7 stays excluded until its text is frozen.
+# Each story's audio is routed to its own age-group subfolder under OUTPUT_BASE.
+# Run with NO positional arg to write production names (overwrite); a positional
+# filter (e.g. `... age4-5_story_251`) still works but tags output with _cmd.
+AGE45_SAMPLE_COUNT = 10   # how many age4-5 stories (from the start) to include
+_discovered = _discover_jobs()
+JOBS = (
+    [j for j in _discovered if j[0].startswith("age2-3")]
+    + [j for j in _discovered if j[0].startswith("age4-5")][:AGE45_SAMPLE_COUNT]
+)
 
 # --- Level 2 tone selection -------------------------------------------------
-# Narration (no quotes) gets a calm storytelling tone. Dialogue (quoted speech)
+# Narration (no quotes) gets an expressive storytelling tone. Dialogue (quoted speech)
 # gets an expressive tone; if an attribution verb is present (shouted,
 # whispered, laughed, ...) the tone is chosen to match that emotion, otherwise
 # a gentle default is used. These parentheticals are VoxCPM2 style hints; the
 # model reads them as instructions and does not speak them aloud.
-NARRATION_TONE = "(slower pace, calm storytelling tone, clear pauses)"
+NARRATION_TONE = "(slower pace, expressive storytelling tone, clear pauses)"
 DEFAULT_DIALOGUE_TONE = "(gentle, expressive voice)"
+
+# Global pacing hint folded into EVERY non-empty style tag by build_prompt(), so
+# the whole story reads slower while keeping the cloned rooster timbre. This is
+# model-level pacing (the "Style Control" from the VoxCPM2 cookbook), NOT a
+# post-hoc time-stretch like --speed, so it slows delivery without colouring the
+# voice. Dial it up if still too fast (e.g. "very slow, deliberate pace") or set
+# it to "" to disable. Changing this text changes the sentence cache key, so
+# affected sentences auto-regenerate on the next run. Ultra-short lines
+# (< MIN_WORDS_FOR_TONE) get no tag at all, so they are unaffected on purpose.
+#
+# PERMANENT LOCKED MECHANISM (user rule) — the VALUE may be retuned, but the
+# MECHANISM must never be deleted and PACE_HINT must never be blank / must always
+# contain "slow" (enforced by _assert_pace_hint). It applies to EVERY story and
+# EVERY age group.
+# CURRENT DECISION (user): ONE uniform pace across ALL ages —
+# "gentle, natural pace, only slightly slow, clear pauses". "natural pace" pulls
+# the read toward the model's own speed, "only slightly slow" keeps a light brake
+# (and satisfies the "slow" lock), "clear pauses" keeps sentence boundaries crisp.
+# This REPLACES the earlier per-age split (age2-3 = full slow global, age4-5 =
+# lighter override); age4-5 no longer overrides PACE_HINT, both inherit this.
+# NOTE: this is a touch faster than the old age2-3 global, so age2-3 speeds up to
+# match age4-5 — intended.
+# HISTORY / DO NOT REPEAT: "very slow", "very slow, deliberate, unhurried pace",
+# and "very slow, calm, measured pace" were all TRIED and REJECTED — they
+# over-slowed AND fought the pitch guard. Never retry "very slow".
+PACE_HINT = "gentle, natural pace, only slightly slow, clear pauses"
+
+
+def _assert_pace_hint(value: str) -> None:
+    """Enforce the PACE_HINT lock. It can NEVER be disabled (blank) or set to a
+    non-slow value; if it ever is, fail loudly here rather than silently ship a
+    fast read. Checked at import AND on every per-age apply (apply_age_profile)."""
+    if not value or "slow" not in value.lower():
+        raise ValueError(
+            "PACE_HINT is a locked constant and must never be disabled: it must "
+            "be non-empty and contain 'slow'. Refusing to run with "
+            f"PACE_HINT={value!r}."
+        )
+
+
+_assert_pace_hint(PACE_HINT)  # fail at import if the locked constant was tampered with
+
+# --- Per-age-group tuning profiles -----------------------------------------
+# Short repetitive age2-3 and longer dialogue-heavy age4-5 have different sweet
+# spots, so each age group overrides the pace/guard knobs independently. Keys not
+# listed in a profile fall back to the defaults snapshotted below.
+# apply_age_profile() sets these globals per story (matched by label prefix)
+# BEFORE that story is generated, so age2-3 and age4-5 never share or clobber
+# each other's pace/guards. Because PACE_HINT is part of the sentence cache key,
+# different per-age paces also get separate cache entries automatically.
+_TUNABLE_DEFAULTS = {
+    "PACE_HINT": PACE_HINT,
+    "PITCH_TOLERANCE_SEMITONES": PITCH_TOLERANCE_SEMITONES,
+    "DURATION_MIN_GUARD_ENABLED": DURATION_MIN_GUARD_ENABLED,
+    "MIN_WORDS_PER_SECOND": MIN_WORDS_PER_SECOND,
+    "MIN_DURATION_BASE_S": MIN_DURATION_BASE_S,
+    "WORDS_PER_SECOND": WORDS_PER_SECOND,
+    "DURATION_BASE_S": DURATION_BASE_S,
+    "MAX_CANDIDATE_SEEDS": MAX_CANDIDATE_SEEDS,
+    "QUOTE_PACE_GUARD_ENABLED": QUOTE_PACE_GUARD_ENABLED,
+    "QUOTE_MIN_WORDS_PER_SECOND": QUOTE_MIN_WORDS_PER_SECOND,
+    "QUOTE_MIN_WORDS": QUOTE_MIN_WORDS,
+    "ASR_VERIFY_ENABLED": ASR_VERIFY_ENABLED,
+    "ASR_MATCH_MIN_RATIO": ASR_MATCH_MIN_RATIO,
+    "SENTENCE_PAUSE_S": SENTENCE_PAUSE_S,
+    "PARAGRAPH_PAUSE_S": PARAGRAPH_PAUSE_S,
+    "NARRATION_TONE": NARRATION_TONE,
+}
+
+# Only list keys that DIFFER from the defaults. Both ages start at the original
+# known-good config (empty = defaults); tune each age here as you audition it.
+# Example: to make age4-5 read slower (the setup the guard-report validated),
+# fill its dict like:
+#     "age4-5": {
+#         "PACE_HINT": "slow, unhurried pace",
+#         "PITCH_TOLERANCE_SEMITONES": 4.5,
+#         "DURATION_MIN_GUARD_ENABLED": True,
+#         "MIN_WORDS_PER_SECOND": 0.28,
+#     },
+AGE_PROFILES: dict[str, dict] = {
+    # Pitch tolerance is looser than the 3.0 default: the guard-reports show the
+    # model routinely lands short lines at 3.0-3.5st from the reference median,
+    # so 3.0 forced seed-exhaustion + kept-at-3.0 compromises anyway (see the
+    # story_011 Coco report: 'Mom nodded' / 'Coco gave a soft sigh' burned all 8
+    # seeds and shipped 3.0 regardless). 3.5 accepts those first-try; 4.0 for
+    # age4-5 whose longer dialogue clusters even higher.
+    "age2-3": {
+        # Pace was confirmed good, so the pace knobs (MIN_WORDS_PER_SECOND,
+        # pauses, the inherited global PACE_HINT) are LEFT ALONE. The only
+        # expressiveness change is a warmer narration tone + a small pitch-
+        # tolerance bump so a little emotion/rhythm gets through without speeding
+        # up. This tone is GENTLER than age4-5's (toddlers still want a steady,
+        # sing-song read, not a big dramatic arc): "warm, gentle" keeps it soft,
+        # "a little playful, natural rise and fall" adds the missing lilt.
+        "NARRATION_TONE": "(warm, gentle storytelling, a little playful, natural rise and fall)",
+        # 3.5 -> 4.0: let mildly-excited/soothing lines (which sit a touch above/
+        # below the median) pass instead of getting reseeded back to flat. Still
+        # well under age4-5's 5.0, so the toddler read stays close to the
+        # reference and never lurches off-register.
+        "PITCH_TOLERANCE_SEMITONES": 4.0,
+        # PACE_HINT ("slow, unhurried pace") is now the GLOBAL default, so it is
+        # NOT repeated here — age2-3 inherits it. This override only sets the
+        # too-fast floor. It was 0.34 (to force a slower, even take), but that
+        # rejected the model's natural ~0.40 spw takes and re-rolled to slower
+        # seeds — which read a touch too deliberate AND caused kept:fast
+        # compromises on 7-8 word action lines (see the story_012 report:
+        # 'The bunny bounced and did a flop.' burned all 8 seeds at ~0.40 spw).
+        # 0.30 lets those slightly-faster, good-pitch takes pass first-try, so the
+        # average pace nudges up a little without touching the locked PACE_HINT.
+        "MIN_WORDS_PER_SECOND": 0.30,
+        # New age2-3 story structure -> longer, more deliberate breaks: 0.7s
+        # between sentences (single \n) and 1.2s between paragraphs (\n\n).
+        # age2-3 ONLY; other ages keep the 0.45/0.80 defaults.
+        "SENTENCE_PAUSE_S": 0.7,
+        "PARAGRAPH_PAUSE_S": 1.2,
+    },
+    "age4-5": {
+        # Looser pitch than age2-3 for TWO reasons: (1) longer dialogue clusters
+        # higher; (2) EXPRESSIVENESS — an excited line sits higher and a sad line
+        # lower than the reference median, so a tight tolerance rejected the
+        # emotional takes and kept only the flat ones. 5.0 lets that emotional
+        # register range through while still catching the ~7st+ 'deep last line'
+        # defect. Pull back toward 4.5 if an occasional line sounds off-register.
+        "PITCH_TOLERANCE_SEMITONES": 5.0,
+        # Listener wanted age4-5 a bit FASTER than the shared pace (older kids,
+        # dialogue-heavy), so re-add a per-age PACE_HINT override that reads
+        # faster than the unified "gentle, natural pace, only slightly slow":
+        # drop "gentle" and soften the brake to "barely slow". Still contains
+        # "slow" (locked-constant rule + _assert_pace_hint). age2-3 keeps the
+        # unified shared pace; ONLY age4-5 diverges here.
+        "PACE_HINT": "natural, flowing pace, barely slow, clear pauses",
+        # Narration was flat/monotone: the default NARRATION_TONE says "calm",
+        # which suppresses emotion. age4-5 stories have a real arc (happy/sad),
+        # so give narration an EXPRESSIVE tone with natural rise and fall. age2-3
+        # keeps the calm default (toddler repetitive style prefers steady).
+        "NARRATION_TONE": "(warm, expressive storytelling, natural rise and fall)",
+        # Longer beat between paragraphs (scene changes) for age4-5: 0.80 -> 0.9s.
+        # Sentence pause stays the 0.45 default (only \n\n gets the longer rest).
+        "PARAGRAPH_PAUSE_S": 0.9,
+    },
+    "age6-7": {},   # future
+}
 
 # Very short lines (fewer than this many words) get NO tone parenthetical.
 # Measured cause of hallucination: on ultra-short lines like "Goodnight, Cow."
@@ -295,52 +548,108 @@ DEFAULT_DIALOGUE_TONE = "(gentle, expressive voice)"
 MIN_WORDS_FOR_TONE = 4
 
 # Attribution verb / adverb -> tone. Matched as whole words, case-insensitive.
+# Each tag is kept to ~2-3 vivid, picture-rich descriptors (NOT a pile): build_prompt
+# folds PACE_HINT in on top, so a 2-3 word emotion + a 3-4 word pace cue already
+# fills the tag; more would over-stack and muddy the read (cookbook: "spoil the broth").
 DIALOGUE_EMOTION = {
-    # excited / loud
-    "shouted": "(excited, loud voice)",
-    "cried": "(excited, loud voice)",
-    "yelled": "(excited, loud voice)",
-    "exclaimed": "(excited, loud voice)",
-    "shrieked": "(excited, loud voice)",
-    "called": "(bright voice, calling out)",
-    "announced": "(bright, clear voice)",
-    # soft / gentle
-    "whispered": "(soft, gentle whisper)",
-    "murmured": "(soft, gentle voice)",
-    "softly": "(soft, gentle voice)",
-    "quietly": "(soft, gentle voice)",
-    "gently": "(soft, gentle voice)",
-    "sighed": "(soft, weary voice)",
-    # stern / angry
-    "growled": "(stern, sharp voice)",
-    "snapped": "(stern, sharp voice)",
-    "demanded": "(stern, firm voice)",
-    "warned": "(stern, serious voice)",
-    "hissed": "(stern, sharp voice)",
-    # happy
-    "laughed": "(warm, cheerful voice)",
-    "giggled": "(warm, cheerful voice)",
-    "chuckled": "(warm, cheerful voice)",
-    "smiled": "(warm, cheerful voice)",
-    "happily": "(warm, cheerful voice)",
-    "cheerfully": "(warm, cheerful voice)",
-    # proud / warm / kind (added after First100 dialogue review)
-    "proudly": "(proud, bright voice)",
-    "warmly": "(warm, gentle voice)",
+    # excited / loud — bright, high-energy exclamations
+    "shouted": "(loud, excited voice)",
+    "cried": "(bright, excited voice)",
+    "yelled": "(loud, excited voice)",
+    "exclaimed": "(surprised, delighted voice)",
+    "shrieked": "(high, startled voice)",
+    "called": "(bright, calling voice)",
+    "announced": "(proud, clear voice)",
+    "gasped": "(surprised, breathless voice)",
+    "cheered": "(joyful, celebrating voice)",
+    "boomed": "(big, booming voice)",
+    # soft / gentle — hushed and tender
+    "whispered": "(soft, hushed whisper)",
+    "murmured": "(soft, gentle murmur)",
+    "softly": "(soft, tender voice)",
+    "quietly": "(soft, tender voice)",
+    "gently": "(soft, tender voice)",
+    "sighed": "(soft, wistful voice)",
+    "whimpered": "(small, trembling voice)",
+    "squeaked": "(tiny, squeaky voice)",
+    # stern / angry — low and sharp
+    "growled": "(low, stern voice)",
+    "snapped": "(sharp, irritated voice)",
+    "demanded": "(firm, insistent voice)",
+    "warned": "(serious, cautioning voice)",
+    "hissed": "(sharp, hushed voice)",
+    # happy — warm and giggly
+    "laughed": "(warm, giggly voice)",
+    "giggled": "(light, giggly voice)",
+    "chuckled": "(warm, amused voice)",
+    "smiled": "(warm, bright voice)",
+    "happily": "(bright, cheerful voice)",
+    "cheerfully": "(bright, cheerful voice)",
+    "teased": "(playful, teasing voice)",
+    # proud / warm / kind / curious
+    "proudly": "(proud, beaming voice)",
+    "warmly": "(warm, tender voice)",
     "kindly": "(warm, gentle voice)",
     "shyly": "(soft, shy voice)",
-    "slowly": "(slow, calm voice)",
+    "slowly": "(slow, thoughtful voice)",
     "firmly": "(firm, steady voice)",
-    # sad / afraid
-    "sobbed": "(sad, trembling voice)",
-    "wailed": "(sad, trembling voice)",
-    "trembled": "(sad, trembling voice)",
+    "wondered": "(curious, wondering voice)",
+    # sad / afraid — tender or trembling
+    "sobbed": "(sad, tearful voice)",
+    "wailed": "(distressed, tearful voice)",
+    "trembled": "(frightened, trembling voice)",
+    "begged": "(pleading, desperate voice)",
+    "groaned": "(weary, grumbling voice)",
 }
 # Precompiled word patterns for the emotion cues.
 _EMOTION_PATTERNS = [
     (re.compile(rf"\b{re.escape(word)}\b", re.IGNORECASE), tone)
     for word, tone in DIALOGUE_EMOTION.items()
 ]
+
+# Scenario/mood-aware NARRATION tone. Narration lines (no quotes) otherwise all
+# get the single per-age NARRATION_TONE, which reads evenly no matter what is
+# happening. This picks a mood-matched narration tone from content keywords so an
+# action beat sounds livelier, a magical beat fuller of wonder, a sad beat softer,
+# a silly beat more playful. First match wins (list order = priority); no match
+# falls back to NARRATION_TONE. Each tag is kept to 2-3 descriptors so build_prompt
+# can still fold PACE_HINT in without over-stacking. Toggle NARRATION_MOOD_ENABLED.
+# Applies to ALL ages (age2-3 too: an action/silly line reading livelier suits the
+# livelier direction); flip the toggle off to go back to one flat narration tone.
+NARRATION_MOOD_ENABLED = True
+_NARRATION_MOODS = [
+    ("sad", re.compile(
+        r"\b(sad|sadly|cried|crying|tears|tearful|alone|lonely|lost|missed|"
+        r"sorry|sniffl\w*|wept|sighed)\b", re.IGNORECASE),
+     "(gentle, tender, wistful storytelling)"),
+    ("silly", re.compile(
+        r"\b(silly|giggl\w*|funny|goofy|wobbl\w*|wiggl\w*|jiggl\w*|flop\w*|"
+        r"tumbl\w*|bounc\w*|splat)\b", re.IGNORECASE),
+     "(playful, giggly storytelling)"),
+    ("wonder", re.compile(
+        r"\b(glow\w*|sparkl\w*|shimmer\w*|shone|shine|magic\w*|star|stars|moon|"
+        r"moonlight|rainbow|glitter\w*|twinkl\w*|wonder\w*|gleam\w*|dream\w*)\b",
+        re.IGNORECASE),
+     "(warm, wonder-filled storytelling)"),
+    ("suspense", re.compile(
+        r"\b(dark|crept|creep\w*|tiptoe\w*|hush\w*|shadow\w*|waited|listen\w*|"
+        r"silent\w*|peek\w*)\b", re.IGNORECASE),
+     "(hushed, curious storytelling)"),
+    ("action", re.compile(
+        r"\b(ran|race\w*|raced|jump\w*|leap\w*|leapt|dash\w*|splash\w*|flew|"
+        r"zoom\w*|burst|chas\w*|rush\w*|hopp\w*|climb\w*|dove|dived|flapp\w*|"
+        r"scrambl\w*)\b", re.IGNORECASE),
+     "(bright, lively, energetic storytelling)"),
+]
+
+
+def narration_tone_for(sentence: str) -> str:
+    """Mood-matched narration tone (falls back to the per-age NARRATION_TONE)."""
+    if NARRATION_MOOD_ENABLED:
+        for _name, pattern, tone in _NARRATION_MOODS:
+            if pattern.search(sentence):
+                return tone
+    return NARRATION_TONE
 
 
 def tone_for(sentence: str) -> str:
@@ -349,7 +658,7 @@ def tone_for(sentence: str) -> str:
     if len(re.findall(r"[A-Za-z0-9']+", sentence)) < MIN_WORDS_FOR_TONE:
         return ""
     if '"' not in sentence:
-        return NARRATION_TONE
+        return narration_tone_for(sentence)
     for pattern, tone in _EMOTION_PATTERNS:
         if pattern.search(sentence):
             return tone
@@ -364,6 +673,10 @@ def build_prompt(sentence: str) -> str:
     (--notone) or the line is too short for a tag, the bare sentence is used.
     """
     tone = tone_for(sentence) if TONE_ENABLED else ""
+    if tone and PACE_HINT and tone.endswith(")"):
+        # Fold the global pacing hint INSIDE the parenthetical style tag, e.g.
+        # "(gentle, expressive voice)" -> "(gentle, expressive voice, slow, ...)".
+        tone = f"{tone[:-1].rstrip()}, {PACE_HINT})"
     return f"{tone} {sentence}" if tone else sentence
 # ---------------------------------------------------------------------------
 
@@ -378,6 +691,11 @@ def expected_max_seconds(sentence: str) -> float:
         DURATION_MIN_LIMIT_S,
         _word_count(sentence) * WORDS_PER_SECOND + DURATION_BASE_S,
     )
+
+
+def expected_min_seconds(sentence: str) -> float:
+    """Lower bound on a non-rushed reading; shorter than this reads as hurried."""
+    return _word_count(sentence) * MIN_WORDS_PER_SECOND + MIN_DURATION_BASE_S
 
 
 # --- Pitch measurement (for the pitch guard) -------------------------------
@@ -453,6 +771,17 @@ def _write_cache(path: Path, wav: np.ndarray, sample_rate: int) -> None:
     try:
         SENTENCE_CACHE_DIR.mkdir(parents=True, exist_ok=True)
         sf.write(str(path), np.asarray(wav, dtype=np.float32), sample_rate)
+    except Exception:
+        pass
+
+
+def _guard_log(line: str) -> None:
+    """Append one per-seed guard diagnostic line to the guard-report file (if on)."""
+    if GUARD_LOG_PATH is None:
+        return
+    try:
+        with GUARD_LOG_PATH.open("a", encoding="utf-8") as f:
+            f.write(line + "\n")
     except Exception:
         pass
 
@@ -634,6 +963,7 @@ def generate_sentence(model, sentence: str, ref_path: Path, sample_rate: int,
 
     prompt = build_prompt(sentence)
     limit = expected_max_seconds(sentence)
+    min_limit = expected_min_seconds(sentence) if DURATION_MIN_GUARD_ENABLED else 0.0
     ref_f0 = reference_median_f0(ref_path) if PITCH_GUARD_ENABLED else None
     ref_centroid = (
         reference_median_centroid(ref_path)
@@ -646,6 +976,7 @@ def generate_sentence(model, sentence: str, ref_path: Path, sample_rate: int,
     best = None
     best_score = float("inf")
     best_reasons: list[str] = []
+    best_measure = ""
     for i in range(n_seeds):
         wav = np.asarray(
             model.generate(
@@ -660,6 +991,7 @@ def generate_sentence(model, sentence: str, ref_path: Path, sample_rate: int,
         )
         dur = len(wav) / sample_rate
         dur_over = max(0.0, dur - limit) if DURATION_GUARD_ENABLED else 0.0
+        dur_under = max(0.0, min_limit - dur) if DURATION_MIN_GUARD_ENABLED else 0.0
 
         # Pitch deviation from the reference voice (0 if unmeasurable).
         semi = 0.0
@@ -686,6 +1018,8 @@ def generate_sentence(model, sentence: str, ref_path: Path, sample_rate: int,
         reasons: list[str] = []
         if DURATION_GUARD_ENABLED and dur > limit:
             reasons.append(f"long {dur:.1f}s>{limit:.1f}s")
+        if DURATION_MIN_GUARD_ENABLED and min_limit > 0 and dur < min_limit:
+            reasons.append(f"fast {dur:.1f}s<{min_limit:.1f}s")
         if PITCH_GUARD_ENABLED and semi > PITCH_TOLERANCE_SEMITONES:
             reasons.append(f"pitch {semi:.1f}st")
         if AUDIO_QUALITY_GUARD_ENABLED:
@@ -698,31 +1032,69 @@ def generate_sentence(model, sentence: str, ref_path: Path, sample_rate: int,
             if CENTROID_GUARD_ENABLED and ref_centroid and centroid_ratio > CENTROID_TOLERANCE_RATIO:
                 reasons.append(f"timbre x{centroid_ratio:.2f}")
 
+        # Intra-sentence dialogue checks. With ASR on, Whisper measures the
+        # quoted span's pace AND verifies intelligibility (mumble/hallucination);
+        # otherwise the silence-split heuristic estimates only the pace.
+        quote_spw = None
+        asr_ratio = None
+        _qt = _split_quote_tail(sentence)
+        if _qt is not None and _word_count(_qt[0]) >= QUOTE_MIN_WORDS:
+            _qw = _word_count(_qt[0])
+            if ASR_VERIFY_ENABLED:
+                asr_ratio, quote_spw = _asr_quote_check(wav, sample_rate, sentence, _qw)
+                if asr_ratio is not None and asr_ratio < ASR_MATCH_MIN_RATIO:
+                    reasons.append(f"asr-mismatch {asr_ratio:.2f}<{ASR_MATCH_MIN_RATIO}")
+                if quote_spw is not None and quote_spw < QUOTE_MIN_WORDS_PER_SECOND:
+                    reasons.append(f"quote-fast {quote_spw:.2f}<{QUOTE_MIN_WORDS_PER_SECOND}")
+            elif QUOTE_PACE_GUARD_ENABLED:
+                quote_spw = _quote_speaking_rate(wav, sample_rate, _qw, _word_count(sentence))
+                if quote_spw is not None and quote_spw < QUOTE_MIN_WORDS_PER_SECOND:
+                    reasons.append(f"quote-fast {quote_spw:.2f}<{QUOTE_MIN_WORDS_PER_SECOND}")
+
+        # Per-seed measurement (logged for EVERY candidate, incl. the accepted
+        # one) so pace can be inspected/calibrated, not just pitch.
+        wc = _word_count(sentence)
+        spw = dur / wc if wc else 0.0
+        measure = (f"dur={dur:.2f}s spw={spw:.2f} pitch={semi:.1f}st "
+                   f"words={wc} limit={limit:.1f}s min={min_limit:.1f}s")
+        if quote_spw is not None:
+            measure += f" qspw={quote_spw:.2f}"
+        if asr_ratio is not None:
+            measure += f" asr={asr_ratio:.2f}"
+
         if not reasons:
+            print(f"    guard: seed {SEED + i} OK  {measure}  \"{sentence[:36]}\"",
+                  file=sys.stderr)
+            _guard_log(f"seed={SEED + i} result=OK {measure} text={sentence!r}")
             if SENTENCE_CACHE_ENABLED and not _CACHE_BYPASS and cache_path is not None:
                 _write_cache(cache_path, wav, sample_rate)
             return wav, []
 
         score = (
             dur_over
+            + dur_under
             + semi
             + clip_frac * 1000.0
             + (5.0 if onset_click else 0.0)
             + max(0.0, internal_sil - INTERNAL_SILENCE_MAX_S)
             + max(0.0, centroid_ratio - 1.0)
+            + (max(0.0, QUOTE_MIN_WORDS_PER_SECOND - quote_spw) if quote_spw is not None else 0.0)
+            + (max(0.0, ASR_MATCH_MIN_RATIO - asr_ratio) * 3.0 if asr_ratio is not None else 0.0)
         )
         if score < best_score:
-            best, best_score, best_reasons = wav, score, reasons
+            best, best_score, best_reasons, best_measure = wav, score, reasons, measure
         print(
-            f"    guard: seed {SEED + i} rejected ({', '.join(reasons)}) "
+            f"    guard: seed {SEED + i} rejected ({', '.join(reasons)})  {measure}  "
             f'"{sentence[:36]}" - trying next',
             file=sys.stderr,
         )
+        _guard_log(f"seed={SEED + i} result=reject:{','.join(reasons)} {measure} text={sentence!r}")
     print(
         f"    guard: kept best candidate (score {best_score:.2f}; "
-        f"{', '.join(best_reasons)}) after {n_seeds} seeds",
+        f"{', '.join(best_reasons)})  {best_measure}  after {n_seeds} seeds",
         file=sys.stderr,
     )
+    _guard_log(f"seed=BEST result=kept:{','.join(best_reasons)} {best_measure} text={sentence!r}")
     if (SENTENCE_CACHE_ENABLED and not _CACHE_BYPASS
             and cache_path is not None and best is not None):
         _write_cache(cache_path, best, sample_rate)
@@ -741,6 +1113,10 @@ _ATTR_SPEECH_VERBS = {
     "growled", "warned", "sighed", "yelled", "gasped", "begged", "chuckled",
     "exclaimed", "screamed", "snapped", "hissed", "muttered", "wondered",
     "smiled", "grinned", "nodded",
+    # Added alongside the enriched DIALOGUE_EMOTION so their attribution tails
+    # (e.g. `"Hooray!" they cheered.`) also merge back onto the quote instead of
+    # generating as tiny, mumble-prone orphan clips.
+    "cheered", "boomed", "whimpered", "squeaked", "teased", "groaned",
 }
 
 
@@ -788,6 +1164,148 @@ def _merge_attribution_tails(sentences: list[str]) -> list[str]:
     return out
 
 
+def _split_quote_tail(sentence: str) -> tuple[str, str] | None:
+    """Split `sentence` into (quote_part, attribution_tail) if it ends with a
+    short attribution tag AFTER a closing double-quote, else None.
+
+    e.g. '"But I am hungry," said Coco.' -> ('"But I am hungry,"', 'said Coco.')
+    Used by the quote-pace guard to score the quoted span on its own.
+    """
+    idx = sentence.rfind('"')
+    if idx == -1:
+        return None
+    tail = sentence[idx + 1:].strip()
+    if not tail or not _is_attribution_tail(tail):
+        return None
+    return sentence[: idx + 1], tail
+
+
+def _quote_speaking_rate(wav: np.ndarray, sample_rate: int,
+                         quote_words: int, total_words: int) -> float | None:
+    """Seconds-per-word of just the quoted span of a quote+attribution clip.
+
+    Splits the audio at the internal pause nearest the expected quote/tail word
+    boundary and measures the quoted span alone. Returns None when it can't
+    confidently split (too short, no interior pause) — a deliberate false-negative
+    so the guard never fires on a bad split.
+    """
+    n = wav.size
+    if n == 0 or quote_words <= 0 or total_words <= 0:
+        return None
+    frame = max(1, int(0.02 * sample_rate))
+    count = n // frame
+    if count < 5:
+        return None
+    block = wav[: count * frame].reshape(count, frame)
+    rms = np.sqrt(np.mean(block.astype(np.float64) ** 2, axis=1))
+    voiced = rms >= SILENCE_RMS_FLOOR
+    idx = np.where(voiced)[0]
+    if idx.size == 0:
+        return None
+    first, last = int(idx[0]), int(idx[-1])
+    if last - first < 3:
+        return None
+    # Interior silent runs = candidate quote/tail boundaries.
+    gaps: list[tuple[int, int]] = []
+    i = first + 1
+    while i < last:
+        if not voiced[i]:
+            j = i
+            while j < last and not voiced[j]:
+                j += 1
+            gaps.append((i, j))
+            i = j
+        else:
+            i += 1
+    if not gaps:
+        return None
+    # Expected boundary position by word fraction; pick the closest interior gap.
+    expected = first + (last - first) * (quote_words / total_words)
+    boundary = min(gaps, key=lambda g: abs((g[0] + g[1]) / 2 - expected))
+    quote_dur = (boundary[0] - first) * frame / sample_rate
+    if quote_dur <= 0.2:
+        return None
+    return quote_dur / quote_words
+
+
+# --- ASR verification (Whisper) helpers ------------------------------------
+_ASR_STATE: dict = {"proc": None, "model": None}
+
+
+def _get_asr():
+    """Lazily load the Whisper processor + model once. The audio array is fed
+    straight to the model, so no FFmpeg/torchcodec decoding is involved."""
+    if _ASR_STATE["model"] is None:
+        import torch
+        from transformers import WhisperProcessor, WhisperForConditionalGeneration
+        proc = WhisperProcessor.from_pretrained(ASR_MODEL)
+        model = WhisperForConditionalGeneration.from_pretrained(ASR_MODEL)
+        model.eval()
+        model.to("cuda" if torch.cuda.is_available() else "cpu")
+        _ASR_STATE["proc"], _ASR_STATE["model"] = proc, model
+    return _ASR_STATE["proc"], _ASR_STATE["model"]
+
+
+def _asr_transcribe_words(wav: np.ndarray, sample_rate: int) -> tuple[str, list[tuple[str, float]]]:
+    """Whisper transcript + [(word, start_time)] for a clip. ("", []) on failure."""
+    import torch
+    try:
+        proc, model = _get_asr()
+        a16 = (librosa.resample(wav.astype(np.float32), orig_sr=sample_rate, target_sr=16000)
+               if sample_rate != 16000 else wav.astype(np.float32))
+        inp = proc(a16, sampling_rate=16000, return_tensors="pt", return_attention_mask=True)
+        dev = model.device
+        with torch.no_grad():
+            out = model.generate(
+                inp.input_features.to(dev), attention_mask=inp.attention_mask.to(dev),
+                language="en", task="transcribe",
+                return_token_timestamps=True, return_dict_in_generate=True,
+            )
+        toks = out["sequences"][0].tolist()
+        times = out["token_timestamps"][0].tolist()
+    except Exception:
+        return "", []
+    # Group BPE tokens into words (a new word begins with a leading space).
+    words: list[tuple[str, float]] = []
+    cur, cur_t = "", 0.0
+    for tid, t in zip(toks, times):
+        piece = proc.tokenizer.decode([tid])
+        if not piece or piece.startswith("<|"):
+            continue
+        if piece.startswith(" ") and cur:
+            words.append((cur, cur_t))
+            cur, cur_t = piece.strip(), float(t)
+        else:
+            if not cur:
+                cur_t = float(t)
+            cur += piece
+    if cur:
+        words.append((cur, cur_t))
+    return " ".join(w for w, _ in words), words
+
+
+def _asr_quote_check(wav: np.ndarray, sample_rate: int, sentence: str,
+                     quote_words: int) -> tuple[float | None, float | None]:
+    """ASR dialogue check. Returns (match_ratio, quote_spw):
+    match_ratio = transcript-vs-text word similarity (0..1); quote_spw = the
+    quoted span's seconds-per-word from word timings (None if unmeasurable)."""
+    import difflib
+    transcript, words = _asr_transcribe_words(wav, sample_rate)
+    if not words:
+        return None, None
+    heard = re.findall(r"[a-z0-9']+", transcript.lower())
+    want = re.findall(r"[a-z0-9']+", sentence.lower())
+    ratio = difflib.SequenceMatcher(None, heard, want).ratio() if want else 1.0
+    quote_spw = None
+    if quote_words > 0 and len(words) > quote_words:
+        # Span from the first word to the first attribution word (quote speech
+        # up to the tail onset); slightly conservative (includes any pause).
+        dur = words[quote_words][1] - words[0][1]
+        if dur > 0.2:
+            quote_spw = dur / quote_words
+    return ratio, quote_spw
+
+
 def split_into_paragraphs(text: str) -> list[list[str]]:
     """Return a list of paragraphs, each a list of sentence strings."""
     paragraphs = []
@@ -811,6 +1329,103 @@ def split_into_paragraphs(text: str) -> list[list[str]]:
     return paragraphs
 
 
+def _output_dir_for_label(label: str) -> Path:
+    """Age-group subfolder for a story's audio (the cache/review stay shared).
+
+    e.g. age2-3_nar_story_011 -> OUTPUT_BASE/age2-3, age4-5_story_251 ->
+    OUTPUT_BASE/age4-5. Keeps different age groups from colliding in one folder.
+    """
+    for prefix in ("age2-3", "age4-5", "age6-7"):
+        if label.startswith(prefix):
+            return OUTPUT_BASE / prefix
+    if label.startswith("batch"):
+        return OUTPUT_BASE / "batches"
+    return OUTPUT_BASE / "misc"
+
+
+def _profile_for_label(label: str) -> dict:
+    """Merged tuning values for a story: module defaults + its age-group overrides."""
+    active = dict(_TUNABLE_DEFAULTS)
+    for prefix, override in AGE_PROFILES.items():
+        if label.startswith(prefix):
+            active.update(override)
+            break
+    return active
+
+
+def apply_age_profile(label: str) -> dict:
+    """Set the per-age tuning globals for `label`, returning the active values.
+
+    Called once per story (before its sentences are generated) so each age group
+    uses its own pace/guards. All names reset from _TUNABLE_DEFAULTS first, so a
+    profile that omits a key gets the default rather than the previous story's.
+    """
+    global PACE_HINT, PITCH_TOLERANCE_SEMITONES, DURATION_MIN_GUARD_ENABLED
+    global MIN_WORDS_PER_SECOND, MIN_DURATION_BASE_S
+    global WORDS_PER_SECOND, DURATION_BASE_S, MAX_CANDIDATE_SEEDS
+    global QUOTE_PACE_GUARD_ENABLED, QUOTE_MIN_WORDS_PER_SECOND, QUOTE_MIN_WORDS
+    global ASR_VERIFY_ENABLED, ASR_MATCH_MIN_RATIO
+    global SENTENCE_PAUSE_S, PARAGRAPH_PAUSE_S
+    global NARRATION_TONE
+    active = _profile_for_label(label)
+    PACE_HINT = active["PACE_HINT"]
+    _assert_pace_hint(PACE_HINT)  # a per-age profile can NEVER disable/blank it
+    PITCH_TOLERANCE_SEMITONES = active["PITCH_TOLERANCE_SEMITONES"]
+    DURATION_MIN_GUARD_ENABLED = active["DURATION_MIN_GUARD_ENABLED"]
+    MIN_WORDS_PER_SECOND = active["MIN_WORDS_PER_SECOND"]
+    MIN_DURATION_BASE_S = active["MIN_DURATION_BASE_S"]
+    WORDS_PER_SECOND = active["WORDS_PER_SECOND"]
+    DURATION_BASE_S = active["DURATION_BASE_S"]
+    MAX_CANDIDATE_SEEDS = active["MAX_CANDIDATE_SEEDS"]
+    QUOTE_PACE_GUARD_ENABLED = active["QUOTE_PACE_GUARD_ENABLED"]
+    QUOTE_MIN_WORDS_PER_SECOND = active["QUOTE_MIN_WORDS_PER_SECOND"]
+    QUOTE_MIN_WORDS = active["QUOTE_MIN_WORDS"]
+    ASR_VERIFY_ENABLED = active["ASR_VERIFY_ENABLED"]
+    ASR_MATCH_MIN_RATIO = active["ASR_MATCH_MIN_RATIO"]
+    SENTENCE_PAUSE_S = active["SENTENCE_PAUSE_S"]
+    PARAGRAPH_PAUSE_S = active["PARAGRAPH_PAUSE_S"]
+    NARRATION_TONE = active["NARRATION_TONE"]
+    if LIVELY_MODE:
+        # Thin the re-roll-heavy guards so the natural, characterful first take
+        # survives instead of being replaced by a flat "safe average" one.
+        PITCH_TOLERANCE_SEMITONES = max(PITCH_TOLERANCE_SEMITONES, 7.0)  # gross drift only
+        # Age-aware pace floor. The floor only REJECTS fast takes; the seed loop
+        # then keeps the FIRST later take that passes, which can OVERSHOOT to
+        # too-slow (e.g. a 0.34 take rejected, next seed lands 0.62 -> 4.3s drag).
+        # Both ages now sit at ~0.30-0.28: age4-5's PACE_HINT is the FASTER
+        # "natural, flowing, barely slow", so its reads land ~0.32-0.40 spw on
+        # purpose; the old 0.33 floor then fought that faster pace (whole story
+        # thrashed + kept:fast compromises on 9-11 word lines). 0.30 lets the
+        # intended-faster takes pass while still catching the truly rushed (<0.30).
+        # age2-3 is a touch slower still, so 0.28 keeps its natural take first-try
+        # (no re-roll, no overshoot).
+        MIN_WORDS_PER_SECOND = 0.30 if label.startswith("age4-5") else 0.28
+        MIN_DURATION_BASE_S = 0.40    # with the coeff above -> effective floor catches only
+                                      # the clearly-rushed tail; 0.40+ spw bulk passes first try.
+        QUOTE_PACE_GUARD_ENABLED = False
+        MAX_CANDIDATE_SEEDS = 6   # was 4; the pace floor now does real work, so give
+                                  # rushed lines a few more tries to find a slower take.
+                                  # Pitch is loose (<=7st) so extra seeds don't flatten register.
+        # Pair the minimal guards with an EXPRESSIVE narration tone across ALL
+        # ages (not just age4-5): lively = "minimal guards + strong rise-and-fall".
+        # This overrides age2-3's gentler tone only during a --lively run; normal
+        # runs keep each age's own tone.
+        NARRATION_TONE = "(warm, expressive storytelling, natural rise and fall)"
+        # Keep the RETURNED profile dict in sync with these lively overrides so
+        # the console line + --guard-report header show the ACTUAL values used,
+        # not the pre-lively profile (otherwise the header misleadingly prints
+        # e.g. pitch<=4.0/wps-min=0.30 while generation really used 7.0/0.20).
+        active.update({
+            "PITCH_TOLERANCE_SEMITONES": PITCH_TOLERANCE_SEMITONES,
+            "MIN_WORDS_PER_SECOND": MIN_WORDS_PER_SECOND,
+            "MIN_DURATION_BASE_S": MIN_DURATION_BASE_S,
+            "QUOTE_PACE_GUARD_ENABLED": QUOTE_PACE_GUARD_ENABLED,
+            "MAX_CANDIDATE_SEEDS": MAX_CANDIDATE_SEEDS,
+            "NARRATION_TONE": NARRATION_TONE,
+        })
+    return active
+
+
 def main() -> int:
     global _CACHE_BYPASS
     global LOUDNESS_NORMALIZE_ENABLED, TRIM_EDGES_ENABLED
@@ -818,8 +1433,10 @@ def main() -> int:
     global TONE_ENABLED
     global SPEED
     global CFG_VALUE, INFERENCE_TIMESTEPS, SEED
+    global GUARD_LOG_PATH
+    global LIVELY_MODE
     dur_report = False
-    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    OUTPUT_BASE.mkdir(parents=True, exist_ok=True)
 
     # Separate flags (--...) from positional filter/override tokens.
     args = sys.argv[1:]
@@ -838,6 +1455,32 @@ def main() -> int:
         ONSET_CLICK_ENABLED = False
         CENTROID_GUARD_ENABLED = False
         print("RAW mode: loudness-norm, edge-trim, and extended guards OFF",
+              file=sys.stderr)
+
+    # Lively is the DEFAULT (LIVELY_MODE=True at module level): it is the
+    # validated production config, so no flag is needed. It thins the re-roll-heavy
+    # guards to a minimal safety net so the natural, characterful FIRST take
+    # survives instead of being re-rolled into a flat "safe average". The per-age
+    # pitch/min-wps/seed overrides happen in apply_age_profile(); the two
+    # non-profile globals (loudness-norm, centroid guard) are turned off here.
+    #
+    # --safe: the inverse escape hatch. Restores the FULL guard stack
+    # (loudness-norm + centroid + quote-pace + tight per-age pitch). Nothing is
+    # deleted — this is the A/B baseline for re-validating a future change. Pair
+    # either mode with --no-cache (they share cache keys otherwise). --lively is
+    # still accepted as a harmless no-op (lively is already the default).
+    if "--safe" in flags:
+        LIVELY_MODE = False
+        print("SAFE mode: full guards ON (loudness-norm + centroid + quote-pace + tight pitch) "
+              "- stable, less expressive (A/B baseline)",
+              file=sys.stderr)
+    else:
+        LIVELY_MODE = True
+        LOUDNESS_NORMALIZE_ENABLED = False   # restore per-sentence volume dynamics/emphasis
+        CENTROID_GUARD_ENABLED = False        # stop rejecting characterful timbres
+        print("LIVELY mode (default): loose pitch (<=7st), no loudness-norm/centroid/quote-pace guard, "
+              "age-aware pace floor (age4-5 0.30 / others 0.28), seeds 6 - expressive first take kept "
+              "(use --safe for the full-guard baseline)",
               file=sys.stderr)
 
     # --first=N: only generate the first N sentences of each story. Fast A/B
@@ -860,9 +1503,16 @@ def main() -> int:
         TONE_ENABLED = False
         print("NOTONE mode: no style-tag prefix on sentences", file=sys.stderr)
 
+    # --asr: enable Whisper transcript+pace verification on dialogue lines for
+    # this run (overrides the default; per-age profiles can still turn it off).
+    if "--asr" in flags:
+        _TUNABLE_DEFAULTS["ASR_VERIFY_ENABLED"] = True
+        print("ASR mode: Whisper transcript+pace verification ON for dialogue",
+              file=sys.stderr)
+
     # --dur-report: print a per-sentence duration table (word count / dur /
     # sec-per-word / current limit) to calibrate the DURATION guard. Logging only.
-    dur_report_path = OUTPUT_DIR / "dur_report.txt"
+    dur_report_path = OUTPUT_BASE / "dur_report.txt"
     if "--dur-report" in flags:
         dur_report = True
         dur_report_path.write_text(
@@ -872,6 +1522,16 @@ def main() -> int:
             encoding="utf-8",
         )
         print(f"dur-report: writing table to {dur_report_path}", file=sys.stderr)
+
+    # --guard-report: write ONE report PER STORY (so a problem story can be
+    # analysed in isolation) into OUTPUT_BASE/guard_reports/guard_report_<label>.txt.
+    # The file is (re)created per story inside the generation loop below; here we
+    # just record the mode and make sure the folder exists.
+    guard_report_enabled = "--guard-report" in flags
+    guard_reports_dir = OUTPUT_BASE / "guard_reports"
+    if guard_report_enabled:
+        guard_reports_dir.mkdir(parents=True, exist_ok=True)
+        print(f"guard-report: per-story tables -> {guard_reports_dir}", file=sys.stderr)
 
     # --speed=X: pitch-preserving time-stretch per sentence (X<1 slower).
     for f in flags:
@@ -988,9 +1648,6 @@ def main() -> int:
     model = VoxCPM.from_pretrained("openbmb/VoxCPM2", load_denoiser=DENOISE_REFERENCE)
     sample_rate = model.tts_model.sample_rate
 
-    sentence_gap = np.zeros(int(SENTENCE_PAUSE_S * sample_rate), dtype=np.float32)
-    paragraph_gap = np.zeros(int(PARAGRAPH_PAUSE_S * sample_rate), dtype=np.float32)
-
     failures = []
     review_entries: list[dict] = []
     for i, (label, txt_path, voice_name) in enumerate(jobs, start=1):
@@ -1001,8 +1658,38 @@ def main() -> int:
             stem += "_cmd"
         if first_n is not None:
             stem += f"_first{first_n}"
-        output_path = OUTPUT_DIR / f"{stem}.wav"
+        out_dir = _output_dir_for_label(label)
+        out_dir.mkdir(parents=True, exist_ok=True)
+        output_path = out_dir / f"{stem}.wav"
         print(f"[{i}/{len(jobs)}] {label}  <- {txt_path.name}  voice={voice_name[:32]}")
+        # Per-age tuning: set this story's pace/guards before generating it.
+        prof = apply_age_profile(label)
+        print(f"  profile: pace={prof['PACE_HINT']!r} pitch<={prof['PITCH_TOLERANCE_SEMITONES']}st "
+              f"min-guard={prof['DURATION_MIN_GUARD_ENABLED']} "
+              f"wps={prof['WORDS_PER_SECOND']} seeds={prof['MAX_CANDIDATE_SEEDS']} "
+              f"pause={prof['SENTENCE_PAUSE_S']}/{prof['PARAGRAPH_PAUSE_S']}s",
+              file=sys.stderr)
+        # Per-age inter-clip silence, built AFTER apply_age_profile so each story
+        # uses its own pauses (age2-3: 0.7s between sentences, 1.2s between
+        # paragraphs; other ages keep the 0.45/0.80 defaults).
+        sentence_gap = np.zeros(int(SENTENCE_PAUSE_S * sample_rate), dtype=np.float32)
+        paragraph_gap = np.zeros(int(PARAGRAPH_PAUSE_S * sample_rate), dtype=np.float32)
+        # Per-story guard report (one file each) so a problem story is isolated,
+        # nested by age group to mirror the audio layout
+        # (guard_reports/age2-3/..., guard_reports/age4-5/..., etc.).
+        if guard_report_enabled:
+            gr_dir = guard_reports_dir / out_dir.name
+            gr_dir.mkdir(parents=True, exist_ok=True)
+            GUARD_LOG_PATH = gr_dir / f"guard_report_{safe_name(label)}.txt"
+            GUARD_LOG_PATH.write_text(
+                "# per-seed guard diagnostics (every candidate, incl. the accepted/kept one)\n"
+                "# fields: seed / result / dur(s) / spw(sec-per-word) / pitch(st) / words / limit(s) / text\n"
+                f"# story: {label}  profile: pitch<={prof['PITCH_TOLERANCE_SEMITONES']}st "
+                f"pace={prof['PACE_HINT']!r} "
+                f"pause={prof['SENTENCE_PAUSE_S']}/{prof['PARAGRAPH_PAUSE_S']}s "
+                f"wps-min={prof['MIN_WORDS_PER_SECOND']}\n",
+                encoding="utf-8",
+            )
 
         if not txt_path.exists():
             print(f"  MISSING story txt: {txt_path}", file=sys.stderr)
