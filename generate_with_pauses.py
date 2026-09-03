@@ -44,9 +44,9 @@ OUTPUT_BASE = PROJECT_DIR / "out" / "first100"
 OUTPUT_DIR = OUTPUT_BASE / "age2-3"
 
 SENTENCE_PAUSE_S = 0.45   # silence between sentences within a paragraph (single \n).
-                          # Per-age via AGE_PROFILES (age2-3 uses 0.7).
+                          # Per-age via AGE_PROFILES (age2-3 uses 0.8).
 PARAGRAPH_PAUSE_S = 0.80  # silence between paragraphs (blank line / \n\n).
-                          # Per-age via AGE_PROFILES (age2-3 uses 1.2).
+                          # Per-age via AGE_PROFILES (age2-3 uses 1.35).
 
 # A quote + its short attribution tag are merged into one chunk only if the
 # combined result stays at/under this word count. Set generously (16): the tail
@@ -390,8 +390,9 @@ def voice_tag_for(voice_name: str) -> str:
 # be regenerated with a different voice on demand via the CLI `story:voice`
 # override. Flip PRODUCTION_VOICE below to switch the whole batch's voice at once.
 # (jabari's VOICE_PROFILES entry is kept for A/B / on-demand use, but rooster has
-# no per-voice override so it reads with the age-group pace directly: age2-3 one
-# rhythm, age4-5 / age6-7 / all tts_stories the shared _OLDER_PROFILE rhythm.)
+# no per-voice override so it reads with the age-group pace directly: age2-3 is
+# slowest, age4-5 uses the new slower-medium profile, and age6-7 keeps the prior
+# age4-5 profile. tts_stories route by their age metadata.)
 PRODUCTION_VOICE = VOICE_ROOSTER
 #
 # STORY SET is NOT finalized yet — the text is still being reviewed. So the full
@@ -494,14 +495,15 @@ DEFAULT_DIALOGUE_TONE = "(gentle, expressive voice)"
 # MECHANISM must never be deleted and PACE_HINT must never be blank / must always
 # contain "slow" (enforced by _assert_pace_hint). It applies to EVERY story and
 # EVERY age group.
-# CURRENT DECISION (user): ONE uniform pace across ALL ages —
-# "gentle, natural pace, only slightly slow, clear pauses". "natural pace" pulls
-# the read toward the model's own speed, "only slightly slow" keeps a light brake
-# (and satisfies the "slow" lock), "clear pauses" keeps sentence boundaries crisp.
-# This REPLACES the earlier per-age split (age2-3 = full slow global, age4-5 =
-# lighter override); age4-5 no longer overrides PACE_HINT, both inherit this.
-# NOTE: this is a touch faster than the old age2-3 global, so age2-3 speeds up to
-# match age4-5 — intended.
+# CURRENT DECISION (user 2026-08): this global is the fallback and the retained
+# age6-7 production hint. age4-5 and tts 4+/6+ override it with their newer,
+# moderately-slow hint. age2-3 has its own slow, unhurried PACE_HINT.
+# An earlier revision wrongly unified ALL ages onto this "only slightly slow"
+# pace, which made age2-3 read at the age4-5 DICTION speed (only the pauses were
+# longer) — that was a mistake and is reverted for age2-3.
+# "natural pace" pulls the read toward the model's own speed, "only slightly slow"
+# keeps a light brake (and satisfies the "slow" lock), "clear pauses" keeps
+# sentence boundaries crisp.
 # HISTORY / DO NOT REPEAT: "very slow", "very slow, deliberate, unhurried pace",
 # and "very slow, calm, measured pace" were all TRIED and REJECTED — they
 # over-slowed AND fought the pitch guard. Never retry "very slow".
@@ -559,27 +561,31 @@ _TUNABLE_DEFAULTS = {
 #         "DURATION_MIN_GUARD_ENABLED": True,
 #         "MIN_WORDS_PER_SECOND": 0.28,
 #     },
-# Story-read pace is a THREE-LEVEL gradient (user decision 2026-07):
-#   age2-3 (slowest)  <  age4-5 (medium)  <  age6-7 (fastest)
-# The two "older tier" profiles below split what used to be one shared profile.
-# age4-5 reads a touch slower than age6-7 via a lighter pace hint ("only slightly
-# slow" vs "barely slow") AND slightly longer pauses. tts_stories (batch...) are
-# MIXED-AGE (some are toddler-friendly, some older), so they follow the MIDDLE
-# (age4-5) pace as a safe compromise. Levers are weak on their own (see repo
-# notes): the clearest speed difference comes from the pauses, the PACE_HINT is a
-# best-effort nudge. Retune each tier here; both keep "slow" (locked-constant rule).
+# Story-read pace has three production tiers:
+#   age2-3 (slowest)  <  age4-5 (slower medium)  <  age6-7 (previous age4-5)
+# age6-7 keeps a separate snapshot of the previous age4-5 profile so later
+# age4-5 tuning cannot change it accidentally. _AGE67_PROFILE remains the faster
+# explicit --fast67 / --as6-7 A/B profile. tts_stories use the matching
+# age2-3, age4-5, or age6-7 production profile according to their metadata.
 _AGE67_PROFILE = {          # fastest older tier (= the old shared _OLDER_PROFILE)
     "PITCH_TOLERANCE_SEMITONES": 5.0,
     "PACE_HINT": "natural, flowing pace, barely slow, clear pauses",
     "NARRATION_TONE": "(warm, expressive storytelling, natural rise and fall)",
     "PARAGRAPH_PAUSE_S": 0.9,
 }
-_AGE45_PROFILE = {          # MEDIUM: slower than 6-7 (lighter brake + longer pauses)
+_AGE67_PRODUCTION_PROFILE = {  # previous age4-5 production profile
     "PITCH_TOLERANCE_SEMITONES": 5.0,
     "PACE_HINT": "gentle, natural pace, only slightly slow, clear pauses",
     "NARRATION_TONE": "(warm, expressive storytelling, natural rise and fall)",
     "SENTENCE_PAUSE_S": 0.55,
     "PARAGRAPH_PAUSE_S": 1.0,
+}
+_AGE45_PROFILE = {          # slower medium tier
+    "PITCH_TOLERANCE_SEMITONES": 5.0,
+    "PACE_HINT": "gentle, moderately slow, natural storytelling pace, clear pauses",
+    "NARRATION_TONE": "(warm, expressive storytelling, natural rise and fall)",
+    "SENTENCE_PAUSE_S": 0.65,
+    "PARAGRAPH_PAUSE_S": 1.1,
 }
 AGE_PROFILES: dict[str, dict] = {
     # Pitch tolerance is looser than the 3.0 default: the guard-reports show the
@@ -602,27 +608,38 @@ AGE_PROFILES: dict[str, dict] = {
         # well under age4-5's 5.0, so the toddler read stays close to the
         # reference and never lurches off-register.
         "PITCH_TOLERANCE_SEMITONES": 4.0,
-        # PACE_HINT ("slow, unhurried pace") is now the GLOBAL default, so it is
-        # NOT repeated here — age2-3 inherits it. This override only sets the
+        # age2-3 gets its OWN slower pace and must NEVER share age4-5's (user rule
+        # 2026-08): toddlers need slower DICTION, not just longer pauses. An
+        # earlier revision wrongly unified all ages onto the global "only slightly
+        # slow" pace, so age2-3 read at age4-5 diction speed (only the pauses were
+        # longer) — that was a mistake, reverted here.
+        # FINAL (user 2026-08): "gentle, slow, unhurried pace" — settled after A/B
+        # ("very slow" dragged, "quite slow" was in between). Slowest tier, still
+        # not "very slow" (which over-slows / fights the pitch guard).
+        "PACE_HINT": "gentle, slow, unhurried pace, clear pauses",
         # too-fast floor. It was 0.34 (to force a slower, even take), but that
         # rejected the model's natural ~0.40 spw takes and re-rolled to slower
         # seeds — which read a touch too deliberate AND caused kept:fast
         # compromises on 7-8 word action lines (see the story_012 report:
         # 'The bunny bounced and did a flop.' burned all 8 seeds at ~0.40 spw).
-        # 0.30 lets those slightly-faster, good-pitch takes pass first-try, so the
-        # average pace nudges up a little without touching the locked PACE_HINT.
+        # 0.30 lets those slightly-faster, good-pitch takes pass first-try.
         "MIN_WORDS_PER_SECOND": 0.30,
-        # New age2-3 story structure -> longer, more deliberate breaks: 0.7s
-        # between sentences (single \n) and 1.2s between paragraphs (\n\n).
+        # New age2-3 story structure -> longer, more deliberate breaks: 0.8s
+        # between sentences (single \n) and 1.35s between paragraphs (\n\n).
         # age2-3 ONLY; other ages keep the 0.45/0.80 defaults.
-        "SENTENCE_PAUSE_S": 0.7,
-        "PARAGRAPH_PAUSE_S": 1.2,
+        "SENTENCE_PAUSE_S": 0.8,
+        "PARAGRAPH_PAUSE_S": 1.35,
     },
-    # THREE-LEVEL pace gradient (user 2026-07): age2-3 slowest, age4-5 MEDIUM,
-    # age6-7 fastest. tts_stories (batch...) are mixed-age -> follow the MIDDLE
-    # age4-5 pace. `--fast67` can still swap age6-7 to variant B for an A/B.
+    # Three production pace tiers: age2-3 is slowest; age4-5 uses the new slower
+    # medium profile; age6-7 keeps the previous age4-5 profile. tts_stories are
+    # mixed-age and routed by
+    # its recommended band (2+/4+/6+ from story_sources.json) via
+    # _tts_profile_for_label() — 2+ -> age2-3, 4+ -> age4-5, 6+ -> age6-7.
+    # This "batch" entry is only the
+    # FALLBACK for a tale whose band is unknown -> middle age4-5. `--fast67` still
+    # restores the faster age6-7 A/B variant when explicitly requested.
     "age4-5": _AGE45_PROFILE,
-    "age6-7": _AGE67_PROFILE,
+    "age6-7": _AGE67_PRODUCTION_PROFILE,
     "batch": _AGE45_PROFILE,
 }
 
@@ -641,6 +658,59 @@ AGE67_PACE_FAST = False   # flipped True by --fast67
 # story's normal-profile take. Lets you compare a story at its default pace (e.g.
 # tts -> middle age4-5) vs the fast age6-7 pace on the SAME text.
 FORCE_AGE67 = False
+# --as2-3 (toddler production re-read): force ANY story (esp. the tts batch fairy
+# tales) to read with the age2-3 (slowest, longest-pause) profile. UNLIKE --as6-7
+# this does NOT tag the filename, so paired with --prod it OVERWRITES the
+# production take -- the toddler read IS the final version for those tales.
+FORCE_AGE23 = False
+
+# --- tts_stories per-story age band (2+/4+/6+) -> pace tier ------------------
+# The batch fairy tales (batch_NN/story_*) are MIXED-AGE. Each tale's recommended
+# band lives in tts_stories/story_sources.json ("age": "2+"/"4+"/"6+"). Rather
+# than read every tale at one middle pace, route by band (user 2026-08):
+#   2+ -> age2-3 (slowest)   4+ -> age4-5 (medium)   6+ -> age6-7 (oldest)
+# Loaded once at import; a missing/unreadable file -> empty
+# map -> batch tales fall back to the AGE_PROFILES["batch"] middle pace. Band
+# value drives the pace only; batch audio still routes to the batches/ folder.
+TTS_SOURCES_PATH = TTS_STORIES / "story_sources.json"
+_TTS_AGE_BAND_TO_PROFILE = {
+    "2+": AGE_PROFILES["age2-3"],
+    "4+": _AGE45_PROFILE,
+    "6+": _AGE67_PRODUCTION_PROFILE,
+}
+_STORY_ID_RE = re.compile(r"story_\d+")
+
+
+def _load_tts_age_bands() -> dict[str, str]:
+    """Map story id ('story_001') -> age band ('2+'/'4+'/'6+') from
+    story_sources.json. Empty on any read/parse error (batch tales then fall
+    back to the middle age4-5 pace)."""
+    try:
+        data = json.loads(TTS_SOURCES_PATH.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+    bands: dict[str, str] = {}
+    for entry in data.get("stories", []):
+        sid, band = entry.get("id"), entry.get("age")
+        if sid and band:
+            bands[sid] = band
+    return bands
+
+
+_TTS_AGE_BANDS = _load_tts_age_bands()
+
+
+def _tts_profile_for_label(label: str) -> dict | None:
+    """Age-band pace profile for a batch tts tale (by its story id), or None when
+    the label isn't a batch tale or its band is unknown (caller keeps default)."""
+    if not label.startswith("batch"):
+        return None
+    m = _STORY_ID_RE.search(label)
+    if not m:
+        return None
+    band = _TTS_AGE_BANDS.get(m.group(0))
+    return _TTS_AGE_BAND_TO_PROFILE.get(band) if band else None
+
 
 # Very short lines (fewer than this many words) get NO tone parenthetical.
 # Measured cause of hallucination: on ultra-short lines like "Goodnight, Cow."
@@ -724,6 +794,7 @@ DIALOGUE_EMOTION = {
     "explained": "(clear, explaining voice)",
     "gratefully": "(warm, grateful voice)",
     "bravely": "(brave, steady voice)",
+    "friendly": "(warm, friendly voice)",
     # sad / afraid — tender or trembling
     "sobbed": "(sad, tearful voice)",
     "wailed": "(distressed, tearful voice)",
@@ -777,6 +848,7 @@ DIALOGUE_EMOTION = {
     "approvingly": "(warm, approving voice)",
     "impatiently": "(impatient, hurried voice)",
     "tenderly": "(tender, loving voice)",
+    "shakily": "(nervous, trembling voice)",
     # -ed speech / vocalization verbs used as attributions (incl. talking animals):
     "huffed": "(annoyed, huffing voice)",
     "yelped": "(sharp, startled voice)",
@@ -788,6 +860,10 @@ DIALOGUE_EMOTION = {
     "honked": "(loud, honking voice)",
     "neighed": "(loud, neighing voice)",
     "brayed": "(loud, braying voice)",
+    # --- New (2026-08 rewrite scan: attributions in the rewritten stories) ---
+    "hummed": "(gentle, humming voice)",
+    "offered": "(gentle, mild voice)",
+    "grumbled": "(grumbling, discontented voice)",
 }
 # Precompiled word patterns for the emotion cues.
 _EMOTION_PATTERNS = [
@@ -1480,6 +1556,8 @@ _ATTR_SPEECH_VERBS = {
     # in sync with DIALOGUE_EMOTION so their tails merge onto the quote).
     "huffed", "yelped", "puffed", "beamed", "boasted", "scoffed",
     "commanded", "honked", "neighed", "brayed",
+    # New speech verbs from the 2026-08 rewrite scan.
+    "hummed", "offered", "grumbled",
 }
 
 
@@ -1744,9 +1822,18 @@ def _profile_for_label(label: str) -> dict:
         if label.startswith(prefix):
             active.update(override)
             break
+    # tts batch tales: override the "batch" middle pace with the tier matching
+    # THIS tale's own age band (2+/4+/6+ from story_sources.json). Unknown band ->
+    # left at the age4-5 fallback applied by the loop above.
+    tts_prof = _tts_profile_for_label(label)
+    if tts_prof is not None:
+        active.update(tts_prof)
     # --as6-7 A/B: force the age6-7 (fastest) profile onto ANY label for this run.
     if FORCE_AGE67:
         active.update(_AGE67_PROFILE)
+    # --as2-3: force the age2-3 (toddler) profile onto ANY label (e.g. tts tales).
+    if FORCE_AGE23:
+        active.update(AGE_PROFILES["age2-3"])
     return active
 
 
@@ -1866,6 +1953,7 @@ def main() -> int:
     global LIVELY_MODE
     global AGE67_PACE_FAST, FORCE_AGE67
     global READ_PARAGRAPH_MODE
+    global FORCE_AGE23
     dur_report = False
     OUTPUT_BASE.mkdir(parents=True, exist_ok=True)
 
@@ -1943,6 +2031,15 @@ def main() -> int:
         FORCE_AGE67 = True
         print("AS6-7 mode: forcing the age6-7 (fast) profile, output tagged _as67",
               file=sys.stderr)
+
+    # --as2-3: force the age2-3 (toddler) profile onto ANY story this run (e.g. the
+    # tts fairy tales that should read for young children). No filename tag, so with
+    # --prod it OVERWRITES the production take. Pair with --refresh-cache to also
+    # overwrite the cached sentences.
+    if "--as2-3" in flags:
+        FORCE_AGE23 = True
+        print("AS2-3 mode: forcing the age2-3 (toddler) profile; with --prod this "
+              "OVERWRITES the production take (no _as23 tag)", file=sys.stderr)
 
     # --paragraph: read WHOLE paragraphs as one utterance (natural flow across
     # sentences) instead of one-sentence-at-a-time, for age4-5 + age6-7 + tts
@@ -2161,9 +2258,8 @@ def main() -> int:
               f"wps={prof['WORDS_PER_SECOND']} seeds={prof['MAX_CANDIDATE_SEEDS']} "
               f"pause={prof['SENTENCE_PAUSE_S']}/{prof['PARAGRAPH_PAUSE_S']}s",
               file=sys.stderr)
-        # Per-age inter-clip silence, built AFTER apply_age_profile so each story
-        # uses its own pauses (age2-3: 0.7s between sentences, 1.2s between
-        # paragraphs; other ages keep the 0.45/0.80 defaults).
+        # Per-age inter-clip silence, built AFTER apply_age_profile: age2-3 uses
+        # 0.8/1.35s, age4-5 uses 0.65/1.1s, and age6-7 retains 0.55/1.0s.
         sentence_gap = np.zeros(int(SENTENCE_PAUSE_S * sample_rate), dtype=np.float32)
         paragraph_gap = np.zeros(int(PARAGRAPH_PAUSE_S * sample_rate), dtype=np.float32)
         # Per-story guard report (one file each) so a problem story is isolated,
