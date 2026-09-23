@@ -140,8 +140,23 @@ SEED_OVERRIDES: dict[str, dict[str, int]] = {
     "batch05_story_045": {
         "The little mermaid tried every way she could to tell the prince the truth.": 49,
     },
+    "batch05_story_050": {
+        "He never thought Aladdin could escape with the lamp.": 47,
+    },
+    "batch06_story_057": {
+        "Then Gus sang as loudly as he could.": 47,
+    },
+    "batch07_story_063": {
+        "His mouth was as wide as a barn door.": 47,
+    },
     "batch07_story_064": {
         '"We will not be hungry anymore!"': 48,
+    },
+    "batch10_story_095": {
+        '"I have fields to plow and no horse at all."': 47,
+    },
+    "batch13_story_126": {
+        "Then he hid behind it and watched.": 47,
     },
     "age2-3_nar_story_019": {
         # Listener choice: seed 47. Backup: seed 48.
