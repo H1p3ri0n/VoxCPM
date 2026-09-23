@@ -103,6 +103,128 @@ CFG_VALUE = 2.5  # 2.5 = the sweet spot: clean articulation + stable cloned timb
 INFERENCE_TIMESTEPS = 10
 SEED = 45  # 45 is the default base seed (43 hallucinated an extra line on story_001)
 
+# Per-sentence base-seed overrides, grouped BY STORY LABEL then keyed by the EXACT
+# sentence text. A line here generates ONLY the given listener-selected seed:
+# guards still measure/report defects, but they cannot replace it with a later
+# seed. Scoping by label matters: the same sentence in another story keeps the
+# normal seed and retry loop.
+# - batch01_story_003 "The witch would climb all the way up.": at seed 45 the loop
+#   rejected 2.72s as `fast` by 0.08s and settled on seed 46, a 4.16s read the
+#   listener rejected as dragging with a floaty ending. Seed 48 (3.20s, spw 0.40,
+#   end -1.0) was approved.
+# The override is part of the cache key, so changing one auto-invalidates that
+# story's copy of that sentence only.
+SEED_OVERRIDES: dict[str, dict[str, int]] = {
+    "batch01_story_003": {
+        "The witch would climb all the way up.": 48,
+    },
+    "batch01_story_007": {
+        '"Run, run, as fast as you can!"': 47,
+    },
+    "batch02_story_017": {
+        '"I wish that my family never has to be poor again."': 48,
+        'I only found the bottle and wanted to know what it was."': 50,
+    },
+    "batch03_story_030": {
+        "He also gave them a great deal of money.": 48,
+    },
+    "batch04_story_039": {
+        'I will not give it away, not even to win a bride."': 49,
+    },
+    "batch05_story_041": {
+        'And I know a way to find out."': 46,
+    },
+    "batch05_story_042": {
+        '"I don\'t need to worry about a promise to a frog," she thought while running back.': 47,
+    },
+    "batch05_story_045": {
+        "The little mermaid tried every way she could to tell the prince the truth.": 49,
+    },
+    "batch07_story_064": {
+        '"We will not be hungry anymore!"': 48,
+    },
+    "age2-3_nar_story_019": {
+        # Listener choice: seed 47. Backup: seed 48.
+        '"Her name is on my list."': 47,
+    },
+    "age2-3_nar_story_024": {
+        '"Hello, tall giraffe!" said Liam.': 46,
+    },
+    "age2-3_nar_story_029": {
+        "she said with a hop.": 47,
+    },
+    "age2-3_nar_story_034": {
+        '"You spray like your mama!" said the gull happily.': 46,
+    },
+    "age2-3_nar_story_041": {
+        '"Come and eat!"': 49,
+        "she called to Mama.": 50,
+    },
+    "age2-3_nar_story_046": {
+        '"Cool… sweet… so yummy!" said Ivy.': 50,
+    },
+    "age2-3_nar_story_052": {
+        '"Happy birthday, Nora!" they said cheerfully.': 48,
+        '"Come in, come in!" said Nora happily.': 50,
+    },
+    "age4-5_story_253": {
+        "A little one opened… a big one opened… all of them opened!": 49,
+    },
+    "age4-5_story_255": {
+        '"People only pick what they can see," said the old can.': 48,
+    },
+    "age4-5_story_258": {
+        'If you let me."': 47,
+        "As they walked, the girl asked him questions.": 49,
+    },
+    "age4-5_story_265": {
+        "She rolled up the map and tied it with a stem.": 47,
+    },
+    "age4-5_story_268": {
+        '"We do not eat turkey at our Thanksgiving.': 48,
+        'We grow vegetables, remember?"': 48,
+    },
+    "age4-5_story_271": {
+        "His best friend sat beside him.": 49,
+    },
+    "age4-5_story_285": {
+        '"The light is under the dirt!" Pim called up.': 47,
+    },
+    "age4-5_story_290": {
+        "Cleo opened it.": 48,
+    },
+    "age4-5_story_297": {
+        "The dog wanted it for a chew toy!": 49,
+    },
+    "age6-7_story_657": {
+        "She looked at the road just in front of her instead.": 49,
+    },
+    "age6-7_story_658": {
+        '"You all came for me.': 48,
+        'I would never have made it back without you."': 48,
+    },
+    "age6-7_story_670": {
+        "The birds flew to their nests.": 47,
+    },
+    "age6-7_story_675": {
+        '"I knew it was clever.': 50,
+        'I did not know it was clever enough to call a fire truck."': 50,
+    },
+    "age6-7_story_677": {
+        '"Are you lost?"': 47,
+    },
+}
+
+
+def base_seed_for(label: str, sentence: str) -> int:
+    """Seed for this story's sentence (SEED unless it has an override)."""
+    return SEED_OVERRIDES.get(label, {}).get(sentence.strip(), SEED)
+
+
+def has_seed_override(label: str, sentence: str) -> bool:
+    """Whether this exact story sentence is pinned to one listener-selected seed."""
+    return sentence.strip() in SEED_OVERRIDES.get(label, {})
+
 # Per-call reference denoising is DISABLED: VoxCPM's internal enhance() runs a
 # loudness-normalize step that needs torchaudio's torchcodec/FFmpeg backend,
 # which isn't installed here (RuntimeError: Could not load libtorchcodec).
@@ -1127,7 +1249,8 @@ def _end_pitch_slope(audio: np.ndarray, sample_rate: int) -> float:
 
 
 # --- Sentence cache helpers ------------------------------------------------
-def _sentence_cache_path(voice_tag: str, sentence: str, narration_only: bool = False) -> Path | None:
+def _sentence_cache_path(voice_tag: str, sentence: str, narration_only: bool = False,
+                         label: str = "") -> Path | None:
     """Disk path for a cached sentence, keyed by voice + prompt + gen params.
 
     The generation-affecting parameters (and the tone-decorated prompt) are all
@@ -1138,23 +1261,34 @@ def _sentence_cache_path(voice_tag: str, sentence: str, narration_only: bool = F
     if not SENTENCE_CACHE_ENABLED:
         return None
     prompt = build_prompt(sentence, narration_only)
-    key = "|".join([
+    parts = [
         f"v={voice_tag}",
         f"logic={CACHE_LOGIC_VERSION}",
         f"cfg={CFG_VALUE}",
         f"ts={INFERENCE_TIMESTEPS}",
-        f"seed={SEED}",
-        f"txt={prompt}",
-    ])
+        f"seed={base_seed_for(label, sentence)}",
+    ]
+    # Only pinned sentences carry this marker, so every other sentence keeps the
+    # key it already has on disk instead of invalidating the whole cache.
+    if has_seed_override(label, sentence):
+        parts.append("pinned=1")
+    parts.append(f"txt={prompt}")
+    key = "|".join(parts)
     digest = hashlib.sha256(key.encode("utf-8")).hexdigest()[:32]
     return SENTENCE_CACHE_DIR / f"{voice_tag}_{digest}.wav"
 
 
-def _write_cache(path: Path, wav: np.ndarray, sample_rate: int) -> None:
-    """Persist a finished sentence wav to the cache (best-effort, never fatal)."""
+def _write_cache(path: Path, wav: np.ndarray, sample_rate: int, take: str = "") -> None:
+    """Persist a finished sentence wav to the cache (best-effort, never fatal).
+
+    `take` (which seed shipped) goes in a sibling .take file so a later run that
+    serves this sentence from cache can still report the original seed history.
+    """
     try:
         SENTENCE_CACHE_DIR.mkdir(parents=True, exist_ok=True)
         sf.write(str(path), np.asarray(wav, dtype=np.float32), sample_rate)
+        if take:
+            path.with_suffix(".take").write_text(take, encoding="utf-8")
     except Exception:
         pass
 
@@ -1319,12 +1453,17 @@ def check_story_text(paragraphs: list[list[str]]) -> list[dict]:
 def generate_sentence(model, sentence: str, ref_path: Path, sample_rate: int,
                       voice_tag: str = "voice",
                       narration_only: bool = False,
-                      no_guard: bool = False) -> tuple[np.ndarray, list[str]]:
+                      no_guard: bool = False,
+                      label: str = "") -> tuple[np.ndarray, list[str], str]:
     """Generate one sentence, early-stopping on the first clean candidate.
 
-    Returns (wav, issues). `issues` is empty when a clean candidate was found;
-    otherwise it lists the defect reasons of the best-scoring fallback so the
-    caller can record them in the review queue.
+    Returns (wav, issues, take). `issues` is empty when a clean candidate was
+    found; otherwise it lists the defect reasons of the best-scoring fallback so
+    the caller can record them in the review queue. `take` identifies WHICH
+    generation shipped - "45" (first seed, clean), "48" (accepted after
+    re-seeding), "kept:50" (every seed failed, best-scoring one kept), "cache"
+    or "noguard:45" - and is stored in the sidecar json so the seed history
+    survives even when a later run serves the sentence from cache.
 
     A disk cache keyed by (voice, prompt, gen params) short-circuits everything:
     a cache hit returns immediately without running the model or any guard.
@@ -1339,18 +1478,29 @@ def generate_sentence(model, sentence: str, ref_path: Path, sample_rate: int,
     candidates. If none pass, the lowest-penalty candidate is kept.
     """
     # --- cache lookup (skips model + guards entirely on hit) ---
-    cache_path = _sentence_cache_path(voice_tag, sentence, narration_only)
+    cache_path = _sentence_cache_path(voice_tag, sentence, narration_only, label)
     if (SENTENCE_CACHE_ENABLED and not _CACHE_BYPASS and not _CACHE_REFRESH
             and cache_path is not None and cache_path.exists()):
         try:
             cached, _sr = sf.read(str(cache_path), dtype="float32", always_2d=False)
             if cached.ndim > 1:
                 cached = cached.mean(axis=1)
-            return np.asarray(cached, dtype=np.float32), []
+            try:
+                origin = cache_path.with_suffix(".take").read_text(encoding="utf-8").strip()
+            except Exception:
+                origin = "?"  # cached before .take files existed
+            take = f"cache:{origin}"
+            # Logged so a report still accounts for every sentence; without this
+            # a cache-heavy run produced an empty report and the seed history of
+            # the shipped take was lost.
+            _guard_log(f"seed={take} result=cached dur={len(cached) / sample_rate:.2f}s "
+                       f"words={_word_count(sentence)} text={sentence!r}")
+            return np.asarray(cached, dtype=np.float32), [], take
         except Exception:
             pass  # unreadable cache -> fall through and regenerate
 
     prompt = build_prompt(sentence, narration_only)
+    base_seed = base_seed_for(label, sentence)
 
     # no_guard (paragraph read): the plain "read it once" behaviour the user
     # wants -> a SINGLE generation at the fixed base seed, with NO duration/pitch/
@@ -1364,19 +1514,19 @@ def generate_sentence(model, sentence: str, ref_path: Path, sample_rate: int,
                 cfg_value=CFG_VALUE,
                 inference_timesteps=INFERENCE_TIMESTEPS,
                 denoise=DENOISE_REFERENCE,
-                seed=SEED,
+                seed=base_seed,
             ),
             dtype=np.float32,
         )
         wc = _word_count(sentence)
         dur = len(wav) / sample_rate
         spw = dur / wc if wc else 0.0
-        print(f"    no-guard: seed {SEED}  dur={dur:.2f}s spw={spw:.2f} words={wc}  "
+        print(f"    no-guard: seed {base_seed}  dur={dur:.2f}s spw={spw:.2f} words={wc}  "
               f'"{sentence[:36]}"', file=sys.stderr)
-        _guard_log(f"seed={SEED} result=no-guard dur={dur:.2f}s spw={spw:.2f} words={wc} text={sentence!r}")
+        _guard_log(f"seed={base_seed} result=no-guard dur={dur:.2f}s spw={spw:.2f} words={wc} text={sentence!r}")
         if SENTENCE_CACHE_ENABLED and not _CACHE_BYPASS and cache_path is not None:
-            _write_cache(cache_path, wav, sample_rate)
-        return wav, []
+            _write_cache(cache_path, wav, sample_rate, f"noguard:{base_seed}")
+        return wav, [], f"noguard:{base_seed}"
 
     limit = expected_max_seconds(sentence)
     min_limit = expected_min_seconds(sentence) if DURATION_MIN_GUARD_ENABLED else 0.0
@@ -1387,12 +1537,19 @@ def generate_sentence(model, sentence: str, ref_path: Path, sample_rate: int,
     )
 
     any_guard = DURATION_GUARD_ENABLED or PITCH_GUARD_ENABLED or AUDIO_QUALITY_GUARD_ENABLED
-    n_seeds = max(1, MAX_CANDIDATE_SEEDS if any_guard else 1)
+    # Listener-selected overrides are exact takes, not merely retry starting
+    # points. Keep all measurements active, but never advance to another seed.
+    n_seeds = (
+        1
+        if has_seed_override(label, sentence)
+        else max(1, MAX_CANDIDATE_SEEDS if any_guard else 1)
+    )
 
     best = None
     best_score = float("inf")
     best_reasons: list[str] = []
     best_measure = ""
+    best_seed = base_seed
     for i in range(n_seeds):
         wav = np.asarray(
             model.generate(
@@ -1401,7 +1558,7 @@ def generate_sentence(model, sentence: str, ref_path: Path, sample_rate: int,
                 cfg_value=CFG_VALUE,
                 inference_timesteps=INFERENCE_TIMESTEPS,
                 denoise=DENOISE_REFERENCE,
-                seed=SEED + i,  # vary seed so retries actually differ
+                seed=base_seed + i,  # vary seed so retries actually differ
             ),
             dtype=np.float32,
         )
@@ -1491,12 +1648,12 @@ def generate_sentence(model, sentence: str, ref_path: Path, sample_rate: int,
             measure += f" asr={asr_ratio:.2f}"
 
         if not reasons:
-            print(f"    guard: seed {SEED + i} OK  {measure}  \"{sentence[:36]}\"",
+            print(f"    guard: seed {base_seed + i} OK  {measure}  \"{sentence[:36]}\"",
                   file=sys.stderr)
-            _guard_log(f"seed={SEED + i} result=OK {measure} text={sentence!r}")
+            _guard_log(f"seed={base_seed + i} result=OK {measure} text={sentence!r}")
             if SENTENCE_CACHE_ENABLED and not _CACHE_BYPASS and cache_path is not None:
-                _write_cache(cache_path, wav, sample_rate)
-            return wav, []
+                _write_cache(cache_path, wav, sample_rate, str(base_seed + i))
+            return wav, [], str(base_seed + i)
 
         score = (
             dur_over
@@ -1512,12 +1669,14 @@ def generate_sentence(model, sentence: str, ref_path: Path, sample_rate: int,
         )
         if score < best_score:
             best, best_score, best_reasons, best_measure = wav, score, reasons, measure
+            best_seed = base_seed + i
+        tail = " - pinned seed, keeping it" if n_seeds == 1 else " - trying next"
         print(
-            f"    guard: seed {SEED + i} rejected ({', '.join(reasons)})  {measure}  "
-            f'"{sentence[:36]}" - trying next',
+            f"    guard: seed {base_seed + i} rejected ({', '.join(reasons)})  {measure}  "
+            f'"{sentence[:36]}"{tail}',
             file=sys.stderr,
         )
-        _guard_log(f"seed={SEED + i} result=reject:{','.join(reasons)} {measure} text={sentence!r}")
+        _guard_log(f"seed={base_seed + i} result=reject:{','.join(reasons)} {measure} text={sentence!r}")
     print(
         f"    guard: kept best candidate (score {best_score:.2f}; "
         f"{', '.join(best_reasons)})  {best_measure}  after {n_seeds} seeds",
@@ -1526,8 +1685,8 @@ def generate_sentence(model, sentence: str, ref_path: Path, sample_rate: int,
     _guard_log(f"seed=BEST result=kept:{','.join(best_reasons)} {best_measure} text={sentence!r}")
     if (SENTENCE_CACHE_ENABLED and not _CACHE_BYPASS
             and cache_path is not None and best is not None):
-        _write_cache(cache_path, best, sample_rate)
-    return best, best_reasons
+        _write_cache(cache_path, best, sample_rate, f"kept:{best_seed}")
+    return best, best_reasons, f"kept:{best_seed}"
 
 
 def safe_name(stem: str) -> str:
@@ -2143,13 +2302,13 @@ def main() -> int:
     if "--clear-cache" in flags:
         removed = 0
         if SENTENCE_CACHE_DIR.exists():
-            for f in SENTENCE_CACHE_DIR.glob("*.wav"):
+            for f in list(SENTENCE_CACHE_DIR.glob("*.wav")) + list(SENTENCE_CACHE_DIR.glob("*.take")):
                 try:
                     f.unlink()
                     removed += 1
                 except Exception:
                     pass
-        print(f"cache: cleared {removed} cached sentence(s) (--clear-cache)", file=sys.stderr)
+        print(f"cache: cleared {removed} cached file(s) (--clear-cache)", file=sys.stderr)
 
     # Optional CLI filter / voice override.
     #  - Plain token filters jobs by story label or voice (substring match):
@@ -2336,10 +2495,11 @@ def main() -> int:
 
             items: list[dict] = []
             for p_index, s_index, sentence in units:
-                wav, s_issues = generate_sentence(
+                wav, s_issues, take = generate_sentence(
                     model, sentence, ref_path, sample_rate, vtag,
                     narration_only=use_paragraph,
                     no_guard=use_paragraph,
+                    label=label,
                 )
                 wav = np.asarray(wav, dtype=np.float32)
                 if SPEED != 1.0 and wav.size:
@@ -2363,7 +2523,8 @@ def main() -> int:
                     print("  " + row, file=sys.stderr)
                     with dur_report_path.open("a", encoding="utf-8") as _f:
                         _f.write(row + "\n")
-                items.append({"p": p_index, "s": s_index, "text": sentence, "wav": wav})
+                items.append({"p": p_index, "s": s_index, "text": sentence,
+                              "wav": wav, "take": take})
                 for reason in s_issues:
                     review_entries.append({
                         "kind": "guard", "label": label, "voice": vtag,
@@ -2417,6 +2578,7 @@ def main() -> int:
                 cursor += len(it["wav"])
                 segments.append({
                     "paragraph": it["p"], "sentence": it["s"], "text": it["text"],
+                    "take": it["take"],
                     "start": round(start / sample_rate, 3),
                     "end": round(cursor / sample_rate, 3),
                 })
