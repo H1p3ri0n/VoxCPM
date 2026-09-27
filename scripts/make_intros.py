@@ -81,6 +81,7 @@ TITLE_SEEDS = [g.SEED + offset for offset in range(16)]  # 45..60
 # sweep never replaces it), so an approved title read survives re-runs. `--seed`
 # on the command line still wins, for auditioning a different take.
 TITLE_SEED_OVERRIDES: dict[str, int] = {
+    "age4-5_story_313": 50,
     "batch07_story_062": 54,
     "batch02_story_018": 47,
 }
